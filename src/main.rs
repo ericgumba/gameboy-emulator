@@ -1,19 +1,15 @@
-use gameboy_emulator::cpu::CPU;
+use gameboy_emulator::{bus::Bus, cartridge::{self, Cartridge}, cpu::CPU};
 use std::fmt;
+ 
+fn main() -> Result<(), Box<dyn std::error::Error>>{ 
+    let cartridge: Cartridge = Cartridge::new("blarg/cpu_instrs/cpu_instrs.gb")?; 
 
-struct Test {
-    f: u8
-}
+    let bus: Bus = Bus::new(cartridge);
 
-impl fmt::Display for Test {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.f)
-    }
-}
+    bus.step();
 
-fn main() {
-    let t: Test = Test { f: 3 };
-    println!("{}", t);
+
 
     println!("Hello, world!");
+    Ok(())
 }
