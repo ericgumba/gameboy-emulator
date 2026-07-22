@@ -14,8 +14,8 @@ impl Bus {
     pub fn read(&self, addr: u16) -> u8 {
         self.cartridge.read(addr)
     }
-    pub fn step(&self) {
-        self.cartridge.get_bytes();
+    pub fn write(&self, addr: u16, val: u8) {
+        unimplemented!();
     }
     
 }
