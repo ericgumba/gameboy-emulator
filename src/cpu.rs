@@ -1,5 +1,18 @@
 use crate::bus::Bus;
 
+macro_rules! make_reg16_writer {
+    ($name:ident, $hi:ident, $lo:ident) => {
+        pub fn $name(&mut self, val: u16) {
+            [self.$hi, self.$lo] = val.to_be_bytes();
+        }
+    };
+}
+
+const FLAG_C: u8 = 1 << 4;
+const FLAG_H: u8 = 1 << 5;
+const FLAG_Z: u8 = 1 << 7;
+const FLAG_N: u8 = 1 << 6;
+
 pub struct CPU {
     a: u8,
     f: u8,
@@ -35,14 +48,38 @@ impl CPU {
         byte
     }
     
-    pub fn sp_write(& mut self, low:u8, high:u8){ self.sp = u16::from_le_bytes([low, high]);}
-    pub fn bc_write(&mut self, low: u8, high: u8) { self.b = high; self.c = low; }
-    pub fn de_write(&mut self, low: u8, high: u8) { self.d = high; self.e = low; }
-    pub fn hl_write(&mut self, low: u8, high: u8) { self.h = high; self.l = low; }
-
+    pub fn sp_write(& mut self, val:u16){ self.sp = val;}
+    pub fn af_write(&mut self, val: u16) { [self.a, self.f] = val.to_be_bytes() }
+    pub fn bc_write(&mut self, val: u16) { [self.b, self.c] = val.to_be_bytes() }
+    pub fn de_write(&mut self, val: u16) { [self.d, self.e] = val.to_be_bytes() }
+    pub fn hl_write(&mut self, val: u16) { [self.h, self.l] = val.to_be_bytes() }
+    pub fn af(&self) -> u16 {u16::from_be_bytes([self.a, self.f])}
     pub fn bc(&self) -> u16 {u16::from_be_bytes([self.b, self.c])}
     pub fn de(&self) -> u16 {u16::from_be_bytes([self.d, self.e])}
     pub fn hl(&self) -> u16 {u16::from_be_bytes([self.h, self.l])}
+
+    fn add_to_hl(&mut self, val: u16) {
+
+        let hl = self.hl();
+        let (val, carry) = hl.overflowing_add(val);
+
+        self.hl_write(val);
+
+        let half_carry = (hl & 0xFFF) + (val & 0xFFF) > 0xFFF;
+        if carry {
+            self.f |= FLAG_C;
+        } else {
+            self.f &= !FLAG_C;
+
+        }
+        if half_carry {
+            self.f |= FLAG_H;
+        } else {
+            self.f &= !FLAG_H;
+        }
+        self.f &= !FLAG_N;
+
+    }
 
     pub fn step(& mut self, bus: &Bus) {
 
@@ -54,11 +91,12 @@ impl CPU {
             0x01 | 0x11 | 0x21 | 0x31 => {
                 let low = self.fetch_u8(bus);
                 let high = self.fetch_u8(bus); 
+                let val = u16::from_le_bytes([low, high]);
                 match instr {
-                    0x01 => self.bc_write(low, high),
-                    0x11 => self.de_write(low, high),
-                    0x21 => self.hl_write(low, high),
-                    0x31 => self.sp_write(low, high),
+                    0x01 => self.bc_write(val),
+                    0x11 => self.de_write(val),
+                    0x21 => self.hl_write(val),
+                    0x31 => self.sp = val,
                     _ => println!("not possible")
                 }
             },
@@ -99,34 +137,44 @@ impl CPU {
 
 
             },
-            0x03 => {
+            // inc r16 
+            0x03 | 0x13 | 0x23 | 0x33 => {
                 match instr {
-                    0x03 => {
-                        let [b,c] = u16::to_be_bytes(self.bc() + 1);
-                        self.bc_write(c, b);
-                        
-                    },
-                    0x13 => {
-                        let [d,e] = u16::to_be_bytes(self.de() + 1);
-                        self.de_write(e, d);
-
-                    },
-                    0x23 => {
-                        let [h, l] = u16::to_be_bytes(self.hl() + 1);
-                        self.hl_write(l, h);
-                    },
-                    0x33 => {
-                        self.sp = self.sp + 1;
-                    }, 
+                    0x03 => self.bc_write(self.bc() + 1),
+                    0x13 => self.de_write(self.de() + 1),
+                    0x23 => self.hl_write(self.hl()+1),
+                    0x33 => self.sp = self.sp + 1, 
                     _ => panic!("unreachable Code")
                 }
 
-            }
+            },
+            // dec r16
+            0x0B | 0x1B | 0x2B | 0x3B => {
+                match instr {
+                    0x0B => self.bc_write(self.bc() - 1),
+                    0x1B => self.de_write(self.de() - 1),
+                    0x2B => self.hl_write(self.hl() - 1),
+                    0x3B => self.sp = self.sp - 1,
+                    _ => panic!("unreachable code")
+                }
+            },
+
+            0x09 | 0x19 | 0x29 | 0x39 => {
+                match instr {
+                    0x09 => self.add_to_hl(self.bc()),
+                    0x19 => self.add_to_hl(self.de()),
+                    0x29 => self.add_to_hl(self.hl()),
+                    0x39 => self.hl_write(self.sp),
+                    _ => panic!("Unreachable code")
+
+                }
+            },
+            
+
+
+
             _ => panic!("...")
             
         }
- 
-
-        
     }
 }
