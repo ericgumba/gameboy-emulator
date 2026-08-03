@@ -27,6 +27,14 @@ pub struct CPU {
 }
 
 impl CPU {
+
+    fn set_flag(&mut self, val: u8, flag: u8) {
+        if val == 1 {
+            self.f |= flag
+        } else {
+            self.f &= !flag
+        }
+    }
     pub fn new() -> Self {
         Self {
             a: 0,
@@ -62,23 +70,24 @@ impl CPU {
 
         let hl = self.hl();
         let (val, carry) = hl.overflowing_add(val);
+        let half_carry = (hl & 0xFFF) + (val & 0xFFF) > 0xFFF;
 
         self.hl_write(val);
 
-        let half_carry = (hl & 0xFFF) + (val & 0xFFF) > 0xFFF;
-        if carry {
-            self.f |= FLAG_C;
-        } else {
-            self.f &= !FLAG_C;
+        self.set_flag(carry as u8, FLAG_C);
+        self.set_flag(half_carry as u8, FLAG_H);
+        self.set_flag(0, FLAG_N);
 
-        }
-        if half_carry {
-            self.f |= FLAG_H;
-        } else {
-            self.f &= !FLAG_H;
-        }
-        self.f &= !FLAG_N;
+    }
 
+    pub fn rlca(&mut self) {
+        let left_bit = self.a >> 7;
+        self.set_flag(left_bit, FLAG_C);
+        self.set_flag(0, FLAG_H);
+        self.set_flag(0, FLAG_N);
+        self.set_flag(0, FLAG_Z);
+        self.a = self.a.rotate_left(1);
+        self.a |= left_bit;
     }
 
     pub fn step(& mut self, bus: &Bus) {
@@ -166,10 +175,44 @@ impl CPU {
                     0x29 => self.add_to_hl(self.hl()),
                     0x39 => self.hl_write(self.sp),
                     _ => panic!("Unreachable code")
-
                 }
             },
-            
+            0x04 | 0x14 | 0x24 | 0x34 | 0x44 | 0x54 | 0x64 | 0x74 => {
+                let rhs: u8 = 1;
+                match instr {
+                    0x04 => self.b = self.b.wrapping_add(rhs),
+                    0x14 => self.c = self.c.wrapping_add(rhs),
+                    0x24 => self.d = self.d.wrapping_add(rhs),
+                    0x34 => self.e = self.e.wrapping_add(rhs),
+                    0x44 => self.h = self.h.wrapping_add(rhs),
+                    0x54 => self.l = self.l.wrapping_add(rhs),
+                    0x64 => bus.write(self.hl(), bus.read(self.hl()).wrapping_add(rhs)),
+                    0x74 => self.a = self.a.wrapping_add(rhs),
+                    _ => panic!("Unreachable code")
+                }
+            },
+            0x05 | 0x15 | 0x25 | 0x35 | 0x45 | 0x55 | 0x65 | 0x75 => {
+                let rhs: u8 = 1;
+                match instr {
+                    0x04 => self.b = self.b.wrapping_sub(rhs),
+                    0x14 => self.c = self.c.wrapping_sub(rhs),
+                    0x24 => self.d = self.d.wrapping_sub(rhs),
+                    0x34 => self.e = self.e.wrapping_sub(rhs),
+                    0x44 => self.h = self.h.wrapping_sub(rhs),
+                    0x54 => self.l = self.l.wrapping_sub(rhs),
+                    0x64 => bus.write(self.hl(), bus.read(self.hl()).wrapping_sub(rhs)),
+                    0x74 => self.a = self.a.wrapping_sub(rhs),
+                    _ => panic!("Unreachable code")
+                }
+            },
+            0x07 => self.rlca(),
+
+
+
+
+
+
+
 
 
 
