@@ -106,27 +106,43 @@ impl CPU {
         self.set_flag(0, FLAG_Z);
     }
 
+    fn cpl(&mut self) {
+        self.a = !self.a;
+        self.set_flag(1, FLAG_N);
+        self.set_flag(1, FLAG_H);
+
+    }
+
     fn daa(&mut self) {
         let mut adjustment: u8 = 0;
-        if self.get_flag(FLAG_N) == 1 {
+        let subtract = self.get_flag(FLAG_N) != 0;
+        let half_carry = self.get_flag(FLAG_H) != 0;
+        let mut carry = self.get_flag(FLAG_C) != 0;
 
-            if self.get_flag(FLAG_H) == 1 {
-                adjustment += 0x6;
+        if subtract {
+            if half_carry {
+                adjustment += 0x06;
             }
-            if self.get_flag(FLAG_C) == 1 {
-                adjustment+= 0x60;
-            }
-            self.a = self.a.wrapping_sub(adjustment);
-        } else {
-            if self.get_flag(FLAG_H) == 1 || self.a & 0xF > 9 {
-                adjustment += 0x6;
-            } 
-            if self.get_flag(FLAG_C) == 1 || self.a > 0x99 {
+            if carry {
                 adjustment += 0x60;
             }
+
+            self.a = self.a.wrapping_sub(adjustment);
+        } else {
+            if half_carry || (self.a & 0x0F) > 0x09 {
+                adjustment += 0x06;
+            }
+            if carry || self.a > 0x99 {
+                adjustment += 0x60;
+                carry = true;
+            }
+
             self.a = self.a.wrapping_add(adjustment);
         }
 
+        self.set_flag((self.a == 0) as u8, FLAG_Z);
+        self.set_flag(0, FLAG_H);
+        self.set_flag(carry as u8, FLAG_C);
     }
 
     fn rlca(&mut self) {
@@ -150,6 +166,7 @@ impl CPU {
         self.set_flag(0, FLAG_N);
         self.set_flag(0, FLAG_Z);
     }
+
 
     pub fn step(& mut self, bus: &Bus) {
 
@@ -266,10 +283,46 @@ impl CPU {
                     _ => panic!("Unreachable code")
                 }
             },
+            // ld r8, imm8	| 0 	0	 x  x  x	1	1	0 
+            0x06 | 0x16 | 0x26 | 0x36 | 0x0E | 0x1E | 0x2E | 0x3E => {
+                let val = self.fetch_u8(bus);
+                match instr {
+                    0x06 => self.b = val,
+                    0x0E => self.c = val,
+                    0x16 => self.d = val,
+                    0x1E => self.e = val,
+                    0x26 => self.h = val,
+                    0x2E => self.l = val,
+                    0x36 => bus.write(self.hl(), val),
+                    0x3E => self.a = val,
+                    _ => panic!("UC")
+                }
+            },
             0x07 => self.rlca(),
-            0x0E => self.rrca(),
+            0x0F => self.rrca(),
             0x17 => self.rla(),
-            0x1E => self.rra(),
+            0x1F => self.rra(),
+            0x27 => self.daa(),
+            0x2F => self.cpl(),
+            0x37 => {
+                self.set_flag(1, FLAG_C);
+                self.set_flag(0, FLAG_N);
+                self.set_flag(0, FLAG_H);
+            },
+            0x3F => {
+                self.set_flag(!self.get_flag(FLAG_C), FLAG_C);
+                self.set_flag(0, FLAG_N);
+                self.set_flag(0, FLAG_H);
+            },
+            0x18 => {
+                let offset = self.fetch_u8(bus) as i8;
+                self.pc = self.pc.wrapping_add_signed(offset as i16);
+            },
+            0x20 | 0x28 | 0x30 | 0x38 => {
+
+            },
+
+
 
 
 
@@ -283,5 +336,50 @@ impl CPU {
             _ => panic!("...")
             
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daa_adjusts_low_digit_after_addition() {
+        let mut cpu = CPU::new();
+        cpu.a = 0x0A;
+
+        cpu.daa();
+
+        assert_eq!(cpu.a, 0x10);
+        assert_eq!(cpu.f, 0);
+    }
+
+    #[test]
+    fn daa_adjusts_both_digits_and_sets_carry_and_zero() {
+        let mut cpu = CPU::new();
+        cpu.a = 0x9A;
+
+        cpu.daa();
+
+        assert_eq!(cpu.a, 0x00);
+        assert_ne!(cpu.get_flag(FLAG_Z), 0);
+        assert_ne!(cpu.get_flag(FLAG_C), 0);
+        assert_eq!(cpu.get_flag(FLAG_H), 0);
+        assert_eq!(cpu.get_flag(FLAG_N), 0);
+    }
+
+    #[test]
+    fn daa_subtracts_adjustment_and_preserves_subtract_and_carry() {
+        let mut cpu = CPU::new();
+        cpu.a = 0x73;
+        cpu.f = FLAG_N | FLAG_H | FLAG_C;
+
+        cpu.daa();
+
+        assert_eq!(cpu.a, 0x0D);
+        assert_ne!(cpu.get_flag(FLAG_N), 0);
+        assert_ne!(cpu.get_flag(FLAG_C), 0);
+        assert_eq!(cpu.get_flag(FLAG_H), 0);
+        assert_eq!(cpu.get_flag(FLAG_Z), 0);
     }
 }
