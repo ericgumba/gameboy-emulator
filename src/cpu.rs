@@ -28,6 +28,10 @@ pub struct CPU {
 
 impl CPU {
 
+    fn get_flag(&self, flag: u8) -> u8 {
+        self.f & flag
+    }
+
     fn set_flag(&mut self, val: u8, flag: u8) {
         if val == 1 {
             self.f |= flag
@@ -80,14 +84,71 @@ impl CPU {
 
     }
 
-    pub fn rlca(&mut self) {
+    fn rla(&mut self) {
         let left_bit = self.a >> 7;
+        let old_carry = self.get_flag(FLAG_C);
+        self.a = self.a << 1 | old_carry;
+
         self.set_flag(left_bit, FLAG_C);
         self.set_flag(0, FLAG_H);
         self.set_flag(0, FLAG_N);
         self.set_flag(0, FLAG_Z);
+    }
+
+    fn rra(&mut self) {
+        let right_bit = self.a & 0x1;
+        let old_carry = self.get_flag(FLAG_C);
+        self.a = self.a >> 1 | old_carry;
+
+        self.set_flag(right_bit, FLAG_C);
+        self.set_flag(0, FLAG_H);
+        self.set_flag(0, FLAG_N);
+        self.set_flag(0, FLAG_Z);
+    }
+
+    fn daa(&mut self) {
+        let mut adjustment: u8 = 0;
+        if self.get_flag(FLAG_N) == 1 {
+
+            if self.get_flag(FLAG_H) == 1 {
+                adjustment += 0x6;
+            }
+            if self.get_flag(FLAG_C) == 1 {
+                adjustment+= 0x60;
+            }
+            self.a = self.a.wrapping_sub(adjustment);
+        } else {
+            if self.get_flag(FLAG_H) == 1 || self.a & 0xF > 9 {
+                adjustment += 0x6;
+            } 
+            if self.get_flag(FLAG_C) == 1 || self.a > 0x99 {
+                adjustment += 0x60;
+            }
+            self.a = self.a.wrapping_add(adjustment);
+        }
+
+    }
+
+    fn rlca(&mut self) {
+        let left_bit = self.a >> 7;
         self.a = self.a.rotate_left(1);
         self.a |= left_bit;
+
+        self.set_flag(left_bit, FLAG_C);
+        self.set_flag(0, FLAG_H);
+        self.set_flag(0, FLAG_N);
+        self.set_flag(0, FLAG_Z);
+    }
+
+    fn rrca(&mut self) {
+        let right_bit = self.a & 0x1;
+        self.a = self.a.rotate_right(1);
+        self.a |= right_bit;
+
+        self.set_flag(right_bit, FLAG_C);
+        self.set_flag(0, FLAG_H);
+        self.set_flag(0, FLAG_N);
+        self.set_flag(0, FLAG_Z);
     }
 
     pub fn step(& mut self, bus: &Bus) {
@@ -206,6 +267,9 @@ impl CPU {
                 }
             },
             0x07 => self.rlca(),
+            0x0E => self.rrca(),
+            0x17 => self.rla(),
+            0x1E => self.rra(),
 
 
 
