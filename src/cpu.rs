@@ -318,20 +318,28 @@ impl CPU {
                 let offset = self.fetch_u8(bus) as i8;
                 self.pc = self.pc.wrapping_add_signed(offset as i16);
             },
+            //  0   1    2  3
+            // nz	z	nc	c
+
             0x20 | 0x28 | 0x30 | 0x38 => {
+                let offset = self.fetch_u8(bus) as i8;
+                match instr {
+                    0x20 => if self.get_flag(FLAG_Z) == 0 {
+                        self.pc = self.pc.wrapping_add_signed(offset as i16);
+                    },
+                    0x28 => if self.get_flag(FLAG_Z) == 1 {
+                        self.pc = self.pc.wrapping_add_signed(offset as i16)
+                    },
+                    0x30 => if self.get_flag(FLAG_C) == 0 {
+                        self.pc = self.pc.wrapping_add_signed(offset as i16)
+                    },
+                    0x38 => if self.get_flag(FLAG_C) == 1 {
+                        self.pc = self.pc.wrapping_add_signed(offset as i16)
+                    },
+                    _ => panic!("unreachable")
+                }
 
             },
-
-
-
-
-
-
-
-
-
-
-
 
             _ => panic!("...")
             
