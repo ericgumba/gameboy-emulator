@@ -95,12 +95,6 @@ impl CPU {
 
         result
     }
-    pub fn sp_write(& mut self, val:u16){ self.sp = val;}
-    pub fn af_write(&mut self, val: u16) { [self.a, self.f] = val.to_be_bytes() }
-    pub fn bc_write(&mut self, val: u16) { [self.b, self.c] = val.to_be_bytes() }
-    pub fn de_write(&mut self, val: u16) { [self.d, self.e] = val.to_be_bytes() }
-    pub fn hl_write(&mut self, val: u16) { [self.h, self.l] = val.to_be_bytes() }
-    pub fn af(&self) -> u16 {u16::from_be_bytes([self.a, self.f])}
     pub fn bc(&self) -> u16 {u16::from_be_bytes([self.b, self.c])}
     pub fn de(&self) -> u16 {u16::from_be_bytes([self.d, self.e])}
     pub fn hl(&self) -> u16 {u16::from_be_bytes([self.h, self.l])}
@@ -111,7 +105,7 @@ impl CPU {
         let (val, carry) = hl.overflowing_add(val);
         let half_carry = (hl & 0xFFF) + (val & 0xFFF) > 0xFFF;
 
-        self.hl_write(val);
+        [self.h, self.l] = val.to_be_bytes();
 
         self.set_flag(carry as u8, FLAG_C);
         self.set_flag(half_carry as u8, FLAG_H);
@@ -216,6 +210,27 @@ impl CPU {
         }
     }
 
+    fn read_r16(&self, register: u8) -> u16 {
+        match register {
+            0 => self.bc(),
+            1 => self.de(),
+            2 => self.hl(),
+            3 => self.sp,
+            _ => unreachable!("a 16 bit register selector is always two bits"),
+        }
+    }
+
+    fn write_r16(&mut self, register: u8, value: u16) {
+        match register {
+            0 => [self.b, self.c] = value.to_be_bytes(),
+            1 => [self.d, self.e] = value.to_be_bytes(),
+            2 => [self.h, self.l] = value.to_be_bytes(),
+            3 => self.sp = value,
+            _ => unreachable!("a 16 bit register selector is always two bits")
+
+        }
+    }
+
     fn write_r8(&mut self, register: u8, value: u8, bus: &Bus) {
         match register {
             0 => self.b = value,
@@ -246,33 +261,17 @@ impl CPU {
                 let low = self.fetch_u8(bus);
                 let high = self.fetch_u8(bus); 
                 let val = u16::from_le_bytes([low, high]);
-                match instr {
-                    0x01 => self.bc_write(val),
-                    0x11 => self.de_write(val),
-                    0x21 => self.hl_write(val),
-                    0x31 => self.sp = val,
-                    _ => println!("not possible")
-                }
+                self.write_r16(instr & 0b0011_0000, val);
             },
             // ld [r16mem], a
-            0x02 | 0x12 | 0x22 | 0x32 => { 
-                match instr {
-                    0x02 => bus.write(self.bc(), self.a),
-                    0x12 => bus.write(self.de(), self.a),
-                    0x22 => bus.write(self.hl(), self.a),
-                    0x32 => bus.write(self.sp, self.a), 
-                    _ => panic!("unreachable Code")
-                }
+            0x02 | 0x12 | 0x22 | 0x32 => {
+                let addr = self.read_r16(instr & 0b0011_0000);
+                bus.write(addr, self.a)
             },
             // ld a, [r16mem]
             0x0A | 0x1A | 0x2A | 0x3A => { 
-                match instr {
-                    0x0A => self.a = bus.read(self.bc()),
-                    0x1A => self.a = bus.read(self.de()),
-                    0x2A => self.a = bus.read(self.hl()),
-                    0x3A => self.a = bus.read(self.sp),
-                    _ => panic!("unreachable Code")
-                }
+                let addr = self.read_r16(instr & 0b0011_0000);
+                self.a = bus.read(addr);
             },
             //ld [imm16], sp
 
@@ -293,35 +292,18 @@ impl CPU {
             },
             // inc r16 
             0x03 | 0x13 | 0x23 | 0x33 => {
-                match instr {
-                    0x03 => self.bc_write(self.bc() + 1),
-                    0x13 => self.de_write(self.de() + 1),
-                    0x23 => self.hl_write(self.hl()+1),
-                    0x33 => self.sp = self.sp + 1, 
-                    _ => panic!("unreachable Code")
-                }
-
-            },
+                let register = instr & 0b0011_0000;
+                let value = self.read_r16(register).wrapping_add(1);
+                self.write_r16(register, value);
+            }
             // dec r16
             0x0B | 0x1B | 0x2B | 0x3B => {
-                match instr {
-                    0x0B => self.bc_write(self.bc() - 1),
-                    0x1B => self.de_write(self.de() - 1),
-                    0x2B => self.hl_write(self.hl() - 1),
-                    0x3B => self.sp = self.sp - 1,
-                    _ => panic!("unreachable code")
-                }
+                let register = instr & 0b0011_0000;
+                let value = self.read_r16(register).wrapping_sub(1);
+                self.write_r16(register, value);
             },
 
-            0x09 | 0x19 | 0x29 | 0x39 => {
-                match instr {
-                    0x09 => self.add_to_hl(self.bc()),
-                    0x19 => self.add_to_hl(self.de()),
-                    0x29 => self.add_to_hl(self.hl()),
-                    0x39 => self.hl_write(self.sp),
-                    _ => panic!("Unreachable code")
-                }
-            },
+            0x09 | 0x19 | 0x29 | 0x39 => self.add_to_hl(self.read_r16(instr & 0b0011_0000)),
             // INC R8
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 let register = instr & 0b0011_1000;
