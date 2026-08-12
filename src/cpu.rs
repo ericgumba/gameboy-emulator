@@ -113,23 +113,8 @@ impl CPU {
 
     }
 
-    fn rla(&mut self) {
-        let left_bit = self.a >> 7;
-        let old_carry = self.get_flag(FLAG_C);
-        self.a = self.a << 1 | old_carry;
-
-        self.set_flag(left_bit, FLAG_C);
-        self.set_flag(0, FLAG_H);
-        self.set_flag(0, FLAG_N);
-        self.set_flag(0, FLAG_Z);
-    }
-
-    fn rra(&mut self) {
-        let right_bit = self.a & 0x1;
-        let old_carry = self.get_flag(FLAG_C);
-        self.a = self.a >> 1 | old_carry;
-
-        self.set_flag(right_bit, FLAG_C);
+    fn update_rotate_flags(&mut self, c_flag_val) {
+        self.set_flag(c_flag_val, FLAG_C);
         self.set_flag(0, FLAG_H);
         self.set_flag(0, FLAG_N);
         self.set_flag(0, FLAG_Z);
@@ -174,26 +159,30 @@ impl CPU {
         self.set_flag(carry as u8, FLAG_C);
     }
 
+    fn rla(&mut self) {
+        let left_bit = self.a >> 7;
+        let old_carry = self.get_flag(FLAG_C);
+        self.a = self.a << 1 | old_carry;
+        self.update_rotate_flags(left_bit);
+    }
+
+    fn rra(&mut self) {
+        let right_bit = self.a & 0x1;
+        let old_carry = self.get_flag(FLAG_C);
+        self.a = (self.a >> 1) | (old_carry << 7);
+        self.update_rotate_flags(right_bit);
+    }
+
     fn rlca(&mut self) {
         let left_bit = self.a >> 7;
         self.a = self.a.rotate_left(1);
-        self.a |= left_bit;
-
-        self.set_flag(left_bit, FLAG_C);
-        self.set_flag(0, FLAG_H);
-        self.set_flag(0, FLAG_N);
-        self.set_flag(0, FLAG_Z);
+        self.update_rotate_flags(left_bit);
     }
 
     fn rrca(&mut self) {
         let right_bit = self.a & 0x1;
         self.a = self.a.rotate_right(1);
-        self.a |= right_bit;
-
-        self.set_flag(right_bit, FLAG_C);
-        self.set_flag(0, FLAG_H);
-        self.set_flag(0, FLAG_N);
-        self.set_flag(0, FLAG_Z);
+        self.update_rotate_flags(right_bit);
     }
 
     fn read_r8(&self, register: u8, bus: &Bus) -> u8 {
