@@ -23,7 +23,8 @@ pub struct CPU {
     h: u8,
     l: u8,
     sp: u16,
-    pc: u16
+    pc: u16,
+    halted: bool,
 }
 
 impl CPU {
@@ -52,6 +53,7 @@ impl CPU {
             l: 0,
             sp: 0,
             pc: 0x100, // Or 0x0100 for a post-bootrom Game Boy state
+            halted: false,
         }
     }
     
@@ -200,8 +202,40 @@ impl CPU {
         self.set_flag(0, FLAG_Z);
     }
 
+    fn read_r8(&self, register: u8, bus: &Bus) -> u8 {
+        match register {
+            0 => self.b,
+            1 => self.c,
+            2 => self.d,
+            3 => self.e,
+            4 => self.h,
+            5 => self.l,
+            6 => bus.read(self.hl()),
+            7 => self.a,
+            _ => unreachable!("an 8-bit register selector is always three bits"),
+        }
+    }
+
+    fn write_r8(&mut self, register: u8, value: u8, bus: &Bus) {
+        match register {
+            0 => self.b = value,
+            1 => self.c = value,
+            2 => self.d = value,
+            3 => self.e = value,
+            4 => self.h = value,
+            5 => self.l = value,
+            6 => bus.write(self.hl(), value),
+            7 => self.a = value,
+            _ => unreachable!("an 8-bit register selector is always three bits"),
+        }
+    }
+
 
     pub fn step(& mut self, bus: &Bus) {
+
+        if self.halted {
+            return;
+        }
 
         let instr = self.fetch_u8(bus);
 
@@ -288,81 +322,24 @@ impl CPU {
                     _ => panic!("Unreachable code")
                 }
             },
+            // INC R8
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
-                match instr {
-                    0x04 => {
-                        self.b = self.inc_u8(self.b);
-                    },
-
-                    0x0C => {
-                        self.c = self.inc_u8(self.c);
-                    },
-
-                    0x14 => {
-                        self.d = self.inc_u8(self.d);
-                    },
-
-                    0x1C => {
-                        self.e = self.inc_u8(self.e);
-                    },
-
-                    0x24 => {
-                        self.h = self.inc_u8(self.h);
-                    },
-
-                    0x2C => {
-                        self.l = self.inc_u8(self.l);
-                    },
-
-                    0x34 => {
-                        let addr = self.hl();
-                        let value = bus.read(addr);
-                        let result = self.inc_u8(value);
-                        bus.write(addr, result);
-                    },
-
-                    0x3C => {
-                        self.a = self.inc_u8(self.a);
-                    },
-
-                    _ => unreachable!(),
-                }
+                let register = instr & 0b0011_1000;
+                let value = self.inc_u8(self.read_r8(register, bus));
+                self.write_r8(register, value, bus);
             },
+            // DEC r8
             0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
-                match instr {
-                    0x05 => self.b = self.dec_u8(self.b),
-                    0x0D => self.c = self.dec_u8(self.c),
-                    0x15 => self.d = self.dec_u8(self.d),
-                    0x1D => self.e = self.dec_u8(self.e),
-                    0x25 => self.h = self.dec_u8(self.h),
-                    0x2D => self.l = self.dec_u8(self.l),
-
-                    0x35 => {
-                        let addr = self.hl();
-                        let result = self.dec_u8(bus.read(addr));
-                        bus.write(addr, result);
-                    },
-
-                    0x3D => self.a = self.dec_u8(self.a),
-
-                    _ => unreachable!(),
-                }
+                let register = instr & 0b0011_1000;
+                let value = self.dec_u8(self.read_r8(register, bus));
+                self.write_r8(register, value, bus);
             },
             
             // ld r8, imm8	| 0 	0	 x  x  x	1	1	0 
             0x06 | 0x16 | 0x26 | 0x36 | 0x0E | 0x1E | 0x2E | 0x3E => {
                 let val = self.fetch_u8(bus);
-                match instr {
-                    0x06 => self.b = val,
-                    0x0E => self.c = val,
-                    0x16 => self.d = val,
-                    0x1E => self.e = val,
-                    0x26 => self.h = val,
-                    0x2E => self.l = val,
-                    0x36 => bus.write(self.hl(), val),
-                    0x3E => self.a = val,
-                    _ => panic!("UC")
-                }
+                let reg_index = instr & 0b0011_1000;
+                self.write_r8(reg_index, val, bus);
             },
             0x07 => self.rlca(),
             0x0F => self.rrca(),
@@ -408,9 +385,14 @@ impl CPU {
             },
 
             0x10 => println!("St0p???"),
-            0x40 | 0x41 | 0x42 | 0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x48 | 0x49 | 
-            0x4A | 0x4B | 0x50 => {
-                
+            0x76 => self.halted = true,
+            // Block 1: 8-bit register-to-register loads
+            0x40..=0x7F => {
+                let source = instr & 0b0000_0111;
+                let destination = (instr >> 3) & 0b0000_0111;
+                let value = self.read_r8(source, bus);
+
+                self.write_r8(destination, value, bus);
             },
 
             _ => panic!("...")
