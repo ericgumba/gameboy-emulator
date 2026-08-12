@@ -39,6 +39,7 @@ impl CPU {
             self.f &= !flag
         }
     }
+
     pub fn new() -> Self {
         Self {
             a: 0,
@@ -59,7 +60,39 @@ impl CPU {
         self.pc = self.pc.wrapping_add(1);
         byte
     }
-    
+
+    fn inc_u8(&mut self, value: u8) -> u8 {
+        let result = value.wrapping_add(1);
+
+        // Z: Set if result is zero.
+        self.set_flag(FLAG_Z, (result == 0) as u8);
+
+        // N: INC is an addition, so clear subtract flag.
+        self.set_flag(FLAG_N, 0);
+
+        // H: Set if there is a carry from bit 3 to bit 4.
+        self.set_flag(FLAG_H, ((value & 0x0F) == 0x0F) as u8);
+
+        // C: Unchanged.
+
+        result
+    }
+    fn dec_u8(&mut self, value: u8) -> u8 {
+        let result = value.wrapping_sub(1);
+
+        // Z: Set if result is zero.
+        self.set_flag(FLAG_Z, (result == 0) as u8);
+
+        // N: DEC is a subtraction.
+        self.set_flag(FLAG_N, 1);
+
+        // H: Set if borrowing from bit 4.
+        self.set_flag(FLAG_H, ((value & 0x0F) == 0) as u8);
+
+        // C: Unchanged.
+
+        result
+    }
     pub fn sp_write(& mut self, val:u16){ self.sp = val;}
     pub fn af_write(&mut self, val: u16) { [self.a, self.f] = val.to_be_bytes() }
     pub fn bc_write(&mut self, val: u16) { [self.b, self.c] = val.to_be_bytes() }
@@ -255,34 +288,67 @@ impl CPU {
                     _ => panic!("Unreachable code")
                 }
             },
-            0x04 | 0x14 | 0x24 | 0x34 | 0x44 | 0x54 | 0x64 | 0x74 => {
-                let rhs: u8 = 1;
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 match instr {
-                    0x04 => self.b = self.b.wrapping_add(rhs),
-                    0x14 => self.c = self.c.wrapping_add(rhs),
-                    0x24 => self.d = self.d.wrapping_add(rhs),
-                    0x34 => self.e = self.e.wrapping_add(rhs),
-                    0x44 => self.h = self.h.wrapping_add(rhs),
-                    0x54 => self.l = self.l.wrapping_add(rhs),
-                    0x64 => bus.write(self.hl(), bus.read(self.hl()).wrapping_add(rhs)),
-                    0x74 => self.a = self.a.wrapping_add(rhs),
-                    _ => panic!("Unreachable code")
+                    0x04 => {
+                        self.b = self.inc_u8(self.b);
+                    },
+
+                    0x0C => {
+                        self.c = self.inc_u8(self.c);
+                    },
+
+                    0x14 => {
+                        self.d = self.inc_u8(self.d);
+                    },
+
+                    0x1C => {
+                        self.e = self.inc_u8(self.e);
+                    },
+
+                    0x24 => {
+                        self.h = self.inc_u8(self.h);
+                    },
+
+                    0x2C => {
+                        self.l = self.inc_u8(self.l);
+                    },
+
+                    0x34 => {
+                        let addr = self.hl();
+                        let value = bus.read(addr);
+                        let result = self.inc_u8(value);
+                        bus.write(addr, result);
+                    },
+
+                    0x3C => {
+                        self.a = self.inc_u8(self.a);
+                    },
+
+                    _ => unreachable!(),
                 }
             },
-            0x05 | 0x15 | 0x25 | 0x35 | 0x45 | 0x55 | 0x65 | 0x75 => {
-                let rhs: u8 = 1;
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
                 match instr {
-                    0x04 => self.b = self.b.wrapping_sub(rhs),
-                    0x14 => self.c = self.c.wrapping_sub(rhs),
-                    0x24 => self.d = self.d.wrapping_sub(rhs),
-                    0x34 => self.e = self.e.wrapping_sub(rhs),
-                    0x44 => self.h = self.h.wrapping_sub(rhs),
-                    0x54 => self.l = self.l.wrapping_sub(rhs),
-                    0x64 => bus.write(self.hl(), bus.read(self.hl()).wrapping_sub(rhs)),
-                    0x74 => self.a = self.a.wrapping_sub(rhs),
-                    _ => panic!("Unreachable code")
+                    0x05 => self.b = self.dec_u8(self.b),
+                    0x0D => self.c = self.dec_u8(self.c),
+                    0x15 => self.d = self.dec_u8(self.d),
+                    0x1D => self.e = self.dec_u8(self.e),
+                    0x25 => self.h = self.dec_u8(self.h),
+                    0x2D => self.l = self.dec_u8(self.l),
+
+                    0x35 => {
+                        let addr = self.hl();
+                        let result = self.dec_u8(bus.read(addr));
+                        bus.write(addr, result);
+                    },
+
+                    0x3D => self.a = self.dec_u8(self.a),
+
+                    _ => unreachable!(),
                 }
             },
+            
             // ld r8, imm8	| 0 	0	 x  x  x	1	1	0 
             0x06 | 0x16 | 0x26 | 0x36 | 0x0E | 0x1E | 0x2E | 0x3E => {
                 let val = self.fetch_u8(bus);
@@ -339,6 +405,12 @@ impl CPU {
                     _ => panic!("unreachable")
                 }
 
+            },
+
+            0x10 => println!("St0p???"),
+            0x40 | 0x41 | 0x42 | 0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x48 | 0x49 | 
+            0x4A | 0x4B | 0x50 => {
+                
             },
 
             _ => panic!("...")
