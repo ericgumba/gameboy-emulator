@@ -33,8 +33,8 @@ impl CPU {
         self.f & flag
     }
 
-    fn set_flag(&mut self, flag: u8, val: u8) {
-        if val == 1 {
+    fn set_flag(&mut self, flag: u8, val: bool) {
+        if val {
             self.f |= flag
         } else {
             self.f &= !flag
@@ -68,13 +68,13 @@ impl CPU {
         let result = value.wrapping_add(1);
 
         // Z: Set if result is zero.
-        self.set_flag(FLAG_Z, (result == 0) as u8);
+        self.set_flag(FLAG_Z, result == 0);
 
         // N: INC is an addition, so clear subtract flag.
-        self.set_flag(FLAG_N, 0);
+        self.set_flag(FLAG_N, false);
 
         // H: Set if there is a carry from bit 3 to bit 4.
-        self.set_flag(FLAG_H, ((value & 0x0F) == 0x0F) as u8);
+        self.set_flag(FLAG_H, (value & 0x0F) == 0x0F);
 
         // C: Unchanged.
 
@@ -84,13 +84,13 @@ impl CPU {
         let result = value.wrapping_sub(1);
 
         // Z: Set if result is zero.
-        self.set_flag(FLAG_Z, (result == 0) as u8);
+        self.set_flag(FLAG_Z, result == 0);
 
         // N: DEC is a subtraction.
-        self.set_flag(FLAG_N, 1);
+        self.set_flag(FLAG_N, true);
 
         // H: Set if borrowing from bit 4.
-        self.set_flag(FLAG_H, ((value & 0x0F) == 0) as u8);
+        self.set_flag(FLAG_H, (value & 0x0F) == 0);
 
         // C: Unchanged.
 
@@ -100,6 +100,36 @@ impl CPU {
     pub fn de(&self) -> u16 {u16::from_be_bytes([self.d, self.e])}
     pub fn hl(&self) -> u16 {u16::from_be_bytes([self.h, self.l])}
 
+    fn add_r8_to_a(&mut self, val: u8) {
+        let a = self.a;
+        let (val, carry) = a.overflowing_add(val);
+        let half_carry = (a & 0xF) + (val & 0xF) > 0xF;
+
+        self.a = val;
+
+        self.set_flag(FLAG_C, carry);
+        self.set_flag(FLAG_H, half_carry);
+        self.set_flag(FLAG_Z, val == 0);
+        self.set_flag(FLAG_N, false);
+    }
+
+    fn sub_r8_from_a(&mut self, val: u8) {
+        let a = self.a;
+        let (val, carry) = a.overflowing_sub(val);
+
+        let half_carry = (a & 0xF) < (val & 0xF);
+
+        self.a = val;
+        
+        
+        self.set_flag(FLAG_Z, val == 0);
+        self.set_flag(FLAG_N, true);
+        self.set_flag(FLAG_H, half_carry);
+        self.set_flag(FLAG_C, carry);
+
+
+    }
+
     fn add_to_hl(&mut self, val: u16) {
 
         let hl = self.hl();
@@ -108,23 +138,23 @@ impl CPU {
 
         [self.h, self.l] = val.to_be_bytes();
 
-        self.set_flag(FLAG_C, carry as u8);
-        self.set_flag(FLAG_H, half_carry as u8);
-        self.set_flag(FLAG_N, 0);
+        self.set_flag(FLAG_C, carry);
+        self.set_flag(FLAG_H, half_carry);
+        self.set_flag(FLAG_N, false);
 
     }
 
     fn update_rotate_flags(&mut self, c_flag_val: u8) {
-        self.set_flag(FLAG_C, c_flag_val);
-        self.set_flag(FLAG_H, 0);
-        self.set_flag(FLAG_N, 0);
-        self.set_flag(FLAG_Z, 0);
+        self.set_flag(FLAG_C, c_flag_val == 1);
+        self.set_flag(FLAG_H, false);
+        self.set_flag(FLAG_N, false);
+        self.set_flag(FLAG_Z, false);
     }
 
     fn cpl(&mut self) {
         self.a = !self.a;
-        self.set_flag(FLAG_N, 1);
-        self.set_flag(FLAG_H, 1);
+        self.set_flag(FLAG_N, true);
+        self.set_flag(FLAG_H, true);
 
     }
 
@@ -155,9 +185,9 @@ impl CPU {
             self.a = self.a.wrapping_add(adjustment);
         }
 
-        self.set_flag(FLAG_Z, (self.a == 0) as u8);
-        self.set_flag(FLAG_H, 0);
-        self.set_flag(FLAG_C, carry as u8);
+        self.set_flag(FLAG_Z, self.a == 0);
+        self.set_flag(FLAG_H, false);
+        self.set_flag(FLAG_C, carry);
     }
 
     fn rla(&mut self) {
@@ -235,12 +265,12 @@ impl CPU {
         }
     }
 
-    pub fn compare(&mut self, a: u8, reg: u8) {
+    pub fn compare(&mut self, reg: u8) {
         let val = self.a.wrapping_sub(reg);
-        self.set_flag(FLAG_Z, (val == 0) as u8);
-        self.set_flag(FLAG_N, 1);
-        self.set_flag(FLAG_H, (self.a & 0x0F < reg & 0x0F) as u8);
-        self.set_flag(FLAG_C, (self.a < reg) as u8);
+        self.set_flag(FLAG_Z, val == 0);
+        self.set_flag(FLAG_N, true);
+        self.set_flag(FLAG_H, self.a & 0x0F < reg & 0x0F);
+        self.set_flag(FLAG_C, self.a < reg);
 
     }
 
@@ -328,15 +358,15 @@ w            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
             0x27 => self.daa(),
             0x2F => self.cpl(),
             0x37 => {
-                self.set_flag(FLAG_C, 1);
-                self.set_flag(FLAG_N, 0);
-                self.set_flag(FLAG_H, 0);
+                self.set_flag(FLAG_C, true);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(FLAG_H, false);
             },
             0x3F => {
-                let carry = (self.get_flag(FLAG_C) == 0) as u8;
+                let carry = (self.get_flag(FLAG_C) == 0);
                 self.set_flag(FLAG_C, carry);
-                self.set_flag(FLAG_N, 0);
-                self.set_flag(FLAG_H, 0);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(FLAG_H, false);
             },
             0x18 => {
                 let offset = self.fetch_u8(bus) as i8;
@@ -381,18 +411,44 @@ w            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
             // TODO need to fix carry flag
             // Document what operation we're carrying out as well
 
-            0x80..=0x87 => self.a = self.a.wrapping_add(self.read_r8(instr & 0b0000_0111, bus)),
-            0x88..=0x8F => self.a = self.a.wrapping_add(self.read_r8(instr & 0b0000_0111, bus) + self.get_flag(FLAG_C)),
-            0x90..=0x97 => self.a = self.a.wrapping_sub(self.read_r8(instr & 0b0000_0111, bus)),
-            0x98..=0x9F => self.a = self.a.wrapping_sub(self.read_r8(instr & 0b0000_0111, bus) - self.get_flag(FLAG_C)),
-            0xA0..=0xA7 => self.a = self.a & self.read_r8(instr & 0b0000_0111, bus),
-            0xA8..=0xAF => self.a = self.a ^ self.read_r8(instr & 0b0000_0111, bus),
-            0xB0..=0xB7 => self.a = self.a | self.read_r8(instr & 0b0000_0111, bus),
-            0xB8..=0xBF => self.compare(self.a, self.read_r8(instr & 0b0000_0111, bus)),
+            0x80..=0x87 => self.add_r8_to_a(self.read_r8(instr & 0b0000_0111, bus)),
+            0x88..=0x8F => {
+                let carry = self.get_flag(FLAG_C);
+                let r8_val_w_carry = self.read_r8(instr & 0b0000_0111, bus).wrapping_add(carry);
+                self.add_r8_to_a(r8_val_w_carry);
+            },
+            0x90..=0x97 => self.sub_r8_from_a(self.read_r8(rinstr & 0b0000_0111, bus)), 
+            0x98..=0x9F => {
+                let carry = self.get_flag(FLAG_C);
+                let r8_val_w_carry = self.read_r8(instr & 0b0000_0111, bus).wrapping_sub(carry);
+                self.sub_r8_from_a(r8_val_w_carry);
+            },
+            0xA0..=0xA7 => {
+                self.a = self.a & self.read_r8(instr & 0b0000_0111, bus);
+                self.set_flag(FLAG_Z, false);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(FLAG_H, true);
+                self.set_flag(FLAG_C, false);
+            },
+            0xA8..=0xAF => {
+                self.a = self.a ^ self.read_r8(instr & 0b0000_0111, bus);
+                self.set_flag(FLAG_Z, false);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(FLAG_H, false);
+                self.set_flag(FLAG_C, false);
+            },
+            0xB0..=0xB7 => {
+                self.a = self.a | self.read_r8(instr & 0b0000_0111, bus);
+                self.set_flag(FLAG_Z, false);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(FLAG_H, false);
+                self.set_flag(FLAG_C, false);
+            },
+            0xB8..=0xBF => self.compare(self.read_r8(instr & 0b0000_0111, bus)),
             0xC6 => {
                 let val = self.fetch_u8(bus);
                 self.a = self.a.wrapping_add(val);
-            }
+            },
             0xCE => {
                 let val = self.fetch_u8(bus);
                 self.a = self.a.wrapping_add(val.wrapping_add(self.get_flag(FLAG_C)));
