@@ -33,7 +33,7 @@ impl CPU {
         self.f & flag
     }
 
-    fn set_flag(&mut self, val: u8, flag: u8) {
+    fn set_flag(&mut self, flag: u8, val: u8) {
         if val == 1 {
             self.f |= flag
         } else {
@@ -56,13 +56,14 @@ impl CPU {
             halted: false,
         }
     }
-    
+
+    // imm8 = fetch_u8
+    // imm16 = call fetch_u8 twice
     pub fn fetch_u8(&mut self, bus: &Bus) -> u8 {
         let byte = bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         byte
     }
-
     fn inc_u8(&mut self, value: u8) -> u8 {
         let result = value.wrapping_add(1);
 
@@ -107,23 +108,23 @@ impl CPU {
 
         [self.h, self.l] = val.to_be_bytes();
 
-        self.set_flag(carry as u8, FLAG_C);
-        self.set_flag(half_carry as u8, FLAG_H);
-        self.set_flag(0, FLAG_N);
+        self.set_flag(FLAG_C, carry as u8);
+        self.set_flag(FLAG_H, half_carry as u8);
+        self.set_flag(FLAG_N, 0);
 
     }
 
-    fn update_rotate_flags(&mut self, c_flag_val) {
-        self.set_flag(c_flag_val, FLAG_C);
-        self.set_flag(0, FLAG_H);
-        self.set_flag(0, FLAG_N);
-        self.set_flag(0, FLAG_Z);
+    fn update_rotate_flags(&mut self, c_flag_val: u8) {
+        self.set_flag(FLAG_C, c_flag_val);
+        self.set_flag(FLAG_H, 0);
+        self.set_flag(FLAG_N, 0);
+        self.set_flag(FLAG_Z, 0);
     }
 
     fn cpl(&mut self) {
         self.a = !self.a;
-        self.set_flag(1, FLAG_N);
-        self.set_flag(1, FLAG_H);
+        self.set_flag(FLAG_N, 1);
+        self.set_flag(FLAG_H, 1);
 
     }
 
@@ -154,9 +155,9 @@ impl CPU {
             self.a = self.a.wrapping_add(adjustment);
         }
 
-        self.set_flag((self.a == 0) as u8, FLAG_Z);
-        self.set_flag(0, FLAG_H);
-        self.set_flag(carry as u8, FLAG_C);
+        self.set_flag(FLAG_Z, (self.a == 0) as u8);
+        self.set_flag(FLAG_H, 0);
+        self.set_flag(FLAG_C, carry as u8);
     }
 
     fn rla(&mut self) {
@@ -234,6 +235,15 @@ impl CPU {
         }
     }
 
+    pub fn compare(&mut self, a: u8, reg: u8) {
+        let val = self.a.wrapping_sub(reg);
+        self.set_flag(FLAG_Z, (val == 0) as u8);
+        self.set_flag(FLAG_N, 1);
+        self.set_flag(FLAG_H, (self.a & 0x0F < reg & 0x0F) as u8);
+        self.set_flag(FLAG_C, (self.a < reg) as u8);
+
+    }
+
 
     pub fn step(& mut self, bus: &Bus) {
 
@@ -293,8 +303,7 @@ impl CPU {
             },
 
             0x09 | 0x19 | 0x29 | 0x39 => self.add_to_hl(self.read_r16(instr & 0b0011_0000)),
-            // INC R8
-            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
+w            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 let register = instr & 0b0011_1000;
                 let value = self.inc_u8(self.read_r8(register, bus));
                 self.write_r8(register, value, bus);
@@ -319,14 +328,15 @@ impl CPU {
             0x27 => self.daa(),
             0x2F => self.cpl(),
             0x37 => {
-                self.set_flag(1, FLAG_C);
-                self.set_flag(0, FLAG_N);
-                self.set_flag(0, FLAG_H);
+                self.set_flag(FLAG_C, 1);
+                self.set_flag(FLAG_N, 0);
+                self.set_flag(FLAG_H, 0);
             },
             0x3F => {
-                self.set_flag(!self.get_flag(FLAG_C), FLAG_C);
-                self.set_flag(0, FLAG_N);
-                self.set_flag(0, FLAG_H);
+                let carry = (self.get_flag(FLAG_C) == 0) as u8;
+                self.set_flag(FLAG_C, carry);
+                self.set_flag(FLAG_N, 0);
+                self.set_flag(FLAG_H, 0);
             },
             0x18 => {
                 let offset = self.fetch_u8(bus) as i8;
@@ -366,12 +376,33 @@ impl CPU {
                 self.write_r8(destination, value, bus);
             },
 
+            // Block 2: 8-bit arithmetic
+
+            // TODO need to fix carry flag
+            // Document what operation we're carrying out as well
+
+            0x80..=0x87 => self.a = self.a.wrapping_add(self.read_r8(instr & 0b0000_0111, bus)),
+            0x88..=0x8F => self.a = self.a.wrapping_add(self.read_r8(instr & 0b0000_0111, bus) + self.get_flag(FLAG_C)),
+            0x90..=0x97 => self.a = self.a.wrapping_sub(self.read_r8(instr & 0b0000_0111, bus)),
+            0x98..=0x9F => self.a = self.a.wrapping_sub(self.read_r8(instr & 0b0000_0111, bus) - self.get_flag(FLAG_C)),
+            0xA0..=0xA7 => self.a = self.a & self.read_r8(instr & 0b0000_0111, bus),
+            0xA8..=0xAF => self.a = self.a ^ self.read_r8(instr & 0b0000_0111, bus),
+            0xB0..=0xB7 => self.a = self.a | self.read_r8(instr & 0b0000_0111, bus),
+            0xB8..=0xBF => self.compare(self.a, self.read_r8(instr & 0b0000_0111, bus)),
+            0xC6 => {
+                let val = self.fetch_u8(bus);
+                self.a = self.a.wrapping_add(val);
+            }
+            0xCE => {
+                let val = self.fetch_u8(bus);
+                self.a = self.a.wrapping_add(val.wrapping_add(self.get_flag(FLAG_C)));
+            }
+
             _ => panic!("...")
             
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
