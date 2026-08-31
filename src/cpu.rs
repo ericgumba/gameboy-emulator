@@ -1,13 +1,5 @@
 use crate::bus::Bus;
 
-macro_rules! make_reg16_writer {
-    ($name:ident, $hi:ident, $lo:ident) => {
-        pub fn $name(&mut self, val: u16) {
-            [self.$hi, self.$lo] = val.to_be_bytes();
-        }
-    };
-}
-
 const FLAG_C: u8 = 1 << 4;
 const FLAG_H: u8 = 1 << 5;
 const FLAG_Z: u8 = 1 << 7;
@@ -100,7 +92,7 @@ impl CPU {
     pub fn de(&self) -> u16 {u16::from_be_bytes([self.d, self.e])}
     pub fn hl(&self) -> u16 {u16::from_be_bytes([self.h, self.l])}
 
-    fn add_r8_to_a(&mut self, val: u8) {
+    fn add_to_a(&mut self, val: u8) {
         let a = self.a;
         let (val, carry) = a.overflowing_add(val);
         let half_carry = (a & 0xF) + (val & 0xF) > 0xF;
@@ -113,7 +105,7 @@ impl CPU {
         self.set_flag(FLAG_N, false);
     }
 
-    fn sub_r8_from_a(&mut self, val: u8) {
+    fn sub_from_a(&mut self, val: u8) {
         let a = self.a;
         let (val, carry) = a.overflowing_sub(val);
 
@@ -142,6 +134,14 @@ impl CPU {
         self.set_flag(FLAG_H, half_carry);
         self.set_flag(FLAG_N, false);
 
+    }
+
+    fn update_bitwise_flags(&mut self, h_flag_val: bool) {
+        self.set_flag(FLAG_Z, false);
+        self.set_flag(FLAG_N, false);
+        self.set_flag(FLAG_H, h_flag_val);
+        self.set_flag(FLAG_C, false);
+        
     }
 
     fn update_rotate_flags(&mut self, c_flag_val: u8) {
@@ -265,7 +265,19 @@ impl CPU {
         }
     }
 
-    pub fn compare(&mut self, reg: u8) {
+    fn cond_flag(&self, flag: u8) -> bool {
+
+        match flag {
+            0 => self.get_flag(FLAG_Z) == 0,
+            1 => self.get_flag(FLAG_Z) == 1,
+            2 => self.get_flag(FLAG_C) == 0,
+            3 => self.get_flag(FLAG_C) == 1,
+            _ => unreachable!("what?")
+        }
+
+    }
+
+    pub fn compare_a(&mut self, reg: u8) {
         let val = self.a.wrapping_sub(reg);
         self.set_flag(FLAG_Z, val == 0);
         self.set_flag(FLAG_N, true);
@@ -333,7 +345,7 @@ impl CPU {
             },
 
             0x09 | 0x19 | 0x29 | 0x39 => self.add_to_hl(self.read_r16(instr & 0b0011_0000)),
-w            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 let register = instr & 0b0011_1000;
                 let value = self.inc_u8(self.read_r8(register, bus));
                 self.write_r8(register, value, bus);
@@ -363,7 +375,7 @@ w            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 self.set_flag(FLAG_H, false);
             },
             0x3F => {
-                let carry = (self.get_flag(FLAG_C) == 0);
+                let carry = self.get_flag(FLAG_C) == 0;
                 self.set_flag(FLAG_C, carry);
                 self.set_flag(FLAG_N, false);
                 self.set_flag(FLAG_H, false);
@@ -407,52 +419,84 @@ w            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
             },
 
             // Block 2: 8-bit arithmetic
-
-            // TODO need to fix carry flag
+ 
             // Document what operation we're carrying out as well
 
-            0x80..=0x87 => self.add_r8_to_a(self.read_r8(instr & 0b0000_0111, bus)),
+            0x80..=0x87 => self.add_to_a(self.read_r8(instr & 0b0000_0111, bus)),
             0x88..=0x8F => {
                 let carry = self.get_flag(FLAG_C);
                 let r8_val_w_carry = self.read_r8(instr & 0b0000_0111, bus).wrapping_add(carry);
-                self.add_r8_to_a(r8_val_w_carry);
+                self.add_to_a(r8_val_w_carry);
             },
-            0x90..=0x97 => self.sub_r8_from_a(self.read_r8(rinstr & 0b0000_0111, bus)), 
+            0x90..=0x97 => self.sub_from_a(self.read_r8(instr & 0b0000_0111, bus)), 
             0x98..=0x9F => {
                 let carry = self.get_flag(FLAG_C);
                 let r8_val_w_carry = self.read_r8(instr & 0b0000_0111, bus).wrapping_sub(carry);
-                self.sub_r8_from_a(r8_val_w_carry);
+                self.sub_from_a(r8_val_w_carry);
             },
             0xA0..=0xA7 => {
                 self.a = self.a & self.read_r8(instr & 0b0000_0111, bus);
-                self.set_flag(FLAG_Z, false);
-                self.set_flag(FLAG_N, false);
-                self.set_flag(FLAG_H, true);
-                self.set_flag(FLAG_C, false);
+                self.update_bitwise_flags(true);
             },
             0xA8..=0xAF => {
                 self.a = self.a ^ self.read_r8(instr & 0b0000_0111, bus);
-                self.set_flag(FLAG_Z, false);
-                self.set_flag(FLAG_N, false);
-                self.set_flag(FLAG_H, false);
-                self.set_flag(FLAG_C, false);
+                self.update_bitwise_flags(false);
             },
             0xB0..=0xB7 => {
                 self.a = self.a | self.read_r8(instr & 0b0000_0111, bus);
-                self.set_flag(FLAG_Z, false);
-                self.set_flag(FLAG_N, false);
-                self.set_flag(FLAG_H, false);
-                self.set_flag(FLAG_C, false);
+                self.update_bitwise_flags(false);
             },
-            0xB8..=0xBF => self.compare(self.read_r8(instr & 0b0000_0111, bus)),
+            0xB8..=0xBF => self.compare_a(self.read_r8(instr & 0b0000_0111, bus)),
+
+            // BLOCK 3
             0xC6 => {
                 let val = self.fetch_u8(bus);
-                self.a = self.a.wrapping_add(val);
+                self.add_to_a(val);
             },
             0xCE => {
+                let carry = self.get_flag(FLAG_C);
+                let val = self.fetch_u8(bus).wrapping_add(carry);
+                self.add_to_a(val);
+            },
+            0xD6 => {
                 let val = self.fetch_u8(bus);
-                self.a = self.a.wrapping_add(val.wrapping_add(self.get_flag(FLAG_C)));
+                self.sub_from_a(val);
+            },
+            0xDE => {
+                let carry = self.get_flag(FLAG_C);
+                let val = self.fetch_u8(bus).wrapping_sub(carry);
+                self.sub_from_a(val);
+            },
+            0xE6 => {
+                let val = self.fetch_u8(bus);
+                self.a = self.a & val;
+                self.update_bitwise_flags(true);
+            },
+            0xEE => {
+                let val = self.fetch_u8(bus);
+                self.a = self.a ^ val;
+                self.update_bitwise_flags(false);
+            },
+            0xF6 => {
+                let val = self.fetch_u8(bus);
+                self.a = self.a | val;
+                self.update_bitwise_flags(false);
             }
+            0xFF => {
+                let val = self.fetch_u8(bus);
+                self.compare_a(val)
+            },
+            // ret cond
+
+            0xC0 | 0xC8 | 0xD0 | 0xD8 => {
+                if self.cond_flag((instr & 0b0001_1000) >> 3) {
+                    let low = bus.read(self.sp) as u16;
+                    self.sp = self.sp.wrapping_add(1);
+                    let high = bus.read(self.sp) as u16;
+                    self.sp = self.sp.wrapping_add(1);
+                    self.pc = (high << 8) | low;
+                }
+            },
 
             _ => panic!("...")
             
