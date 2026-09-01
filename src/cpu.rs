@@ -56,6 +56,12 @@ impl CPU {
         self.pc = self.pc.wrapping_add(1);
         byte
     }
+    pub fn fetch_u16(&mut self, bus: &Bus) -> u16 {
+        let low = self.fetch_u8(bus);
+        let high = self.fetch_u8(bus);
+        u16::from_le_bytes([low, high])
+
+    }
     fn inc_u8(&mut self, value: u8) -> u8 {
         let result = value.wrapping_add(1);
 
@@ -299,9 +305,7 @@ impl CPU {
             0x00 => { }, // nop
             // ld r16, imm16
             0x01 | 0x11 | 0x21 | 0x31 => {
-                let low = self.fetch_u8(bus);
-                let high = self.fetch_u8(bus); 
-                let val = u16::from_le_bytes([low, high]);
+                let val = self.fetch_u16(bus);
                 self.write_r16(instr & 0b0011_0000, val);
             },
             // ld [r16mem], a
@@ -317,9 +321,7 @@ impl CPU {
             //ld [imm16], sp
 
             0x08 => { 
-                let low = self.fetch_u8(bus) as u16;
-                let high = self.fetch_u8(bus) as u16;
-                let addr = (high << 8) ^ low;
+                let addr = self.fetch_u16(bus);
                 
                 // 0x1234
                 let high_sp = (self.sp >> 8) as u8; // 0x12
@@ -497,6 +499,27 @@ impl CPU {
                     self.pc = (high << 8) | low;
                 }
             },
+            0xC9 => {
+                let low = bus.read(self.sp) as u16;
+                self.sp = self.sp.wrapping_add(1);
+                let high = bus.read(self.sp) as u16;
+                self.sp = self.sp.wrapping_add(1);
+                self.pc = (high << 8) | low;
+            },
+            0xD9 => println!("Implement reti!"),
+            0xC2 | 0xCA | 0xD2 | 0xDA => {
+                let val = self.fetch_u16(bus);
+
+                if !self.cond_flag((instr & 0b0001_1000) >> 3) {return}
+
+                self.pc = val;
+            },
+            0xC3 => self.pc = self.fetch_u16(bus),
+            
+
+
+
+
 
             _ => panic!("...")
             
