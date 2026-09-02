@@ -515,6 +515,7 @@ impl CPU {
                 self.pc = val;
             },
             0xC3 => self.pc = self.fetch_u16(bus),
+            0xE9 => self.pc = self.hl(),
             
 
 
