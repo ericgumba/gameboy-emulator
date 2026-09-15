@@ -484,7 +484,7 @@ impl CPU {
                 self.a = self.a | val;
                 self.update_bitwise_flags(false);
             }
-            0xFF => {
+            0xFE => {
                 let val = self.fetch_u8(bus);
                 self.compare_a(val)
             },
@@ -516,7 +516,41 @@ impl CPU {
             },
             0xC3 => self.pc = self.fetch_u16(bus),
             0xE9 => self.pc = self.hl(),
+            0xC4 | 0xCC | 0xD4 | 0xDC => {
+                let flag_val = self.cond_flag((instr >> 3) & 0b11);
+                let addr = self.fetch_u16(bus);
+                let [low, high] = self.pc.to_le_bytes();
+
+                if flag_val {
+                    bus.write(self.sp, high);
+                    self.sp = self.sp.wrapping_sub(1);
+                    bus.write(self.sp, low);
+                    self.sp = self.sp.wrapping_sub(1);
+                    self.pc = addr;
+                }
+            },
+            0x_CD => {
+                let addr = self.fetch_u16(bus);
+                let [low, high] = self.pc.to_le_bytes();
+                self.sp = self.sp.wrapping_sub(1);
+                bus.write(self.sp, high);
+                self.sp = self.sp.wrapping_sub(1);
+                bus.write(self.sp, low);
+                self.pc = addr;
+            },
+            0xC7 | 0xCF | 0xD7 | 0xDF |
+            0xE7 | 0xEF | 0xF7 | 0xFF => {
+                // RST
+                let tgt3 = (instr & 0b0011_1000) as u16;
+                let [low, high] = self.pc.to_le_bytes();
+                self.sp = self.sp.wrapping_sub(1);
+                bus.write(self.sp, high);
+                self.sp = self.sp.wrapping_sub(1);
+                bus.write(self.sp, low);
+                self.pc = tgt3;
+            },
             
+
 
 
 
