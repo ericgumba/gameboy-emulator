@@ -150,11 +150,11 @@ impl CPU {
         
     }
 
-    fn update_rotate_flags(&mut self, c_flag_val: u8) {
-        self.set_flag(FLAG_C, c_flag_val == 1);
+    fn update_rotate_flags(&mut self, c_flag_val: bool, z_flag_val: bool) {
+        self.set_flag(FLAG_C, c_flag_val);
         self.set_flag(FLAG_H, false);
         self.set_flag(FLAG_N, false);
-        self.set_flag(FLAG_Z, false);
+        self.set_flag(FLAG_Z, z_flag_val);
     }
 
     fn cpl(&mut self) {
@@ -200,26 +200,33 @@ impl CPU {
         let left_bit = self.a >> 7;
         let old_carry = self.get_flag(FLAG_C);
         self.a = self.a << 1 | old_carry;
-        self.update_rotate_flags(left_bit);
+        self.update_rotate_flags(left_bit == 1, false);
     }
 
     fn rra(&mut self) {
         let right_bit = self.a & 0x1;
         let old_carry = self.get_flag(FLAG_C);
         self.a = (self.a >> 1) | (old_carry << 7);
-        self.update_rotate_flags(right_bit);
+        self.update_rotate_flags(right_bit == 1, false);
     }
 
     fn rlca(&mut self) {
         let left_bit = self.a >> 7;
         self.a = self.a.rotate_left(1);
-        self.update_rotate_flags(left_bit);
+        self.update_rotate_flags(left_bit == 1, false);
     }
 
     fn rrca(&mut self) {
         let right_bit = self.a & 0x1;
         self.a = self.a.rotate_right(1);
-        self.update_rotate_flags(right_bit);
+        self.update_rotate_flags(right_bit == 1, false);
+    }
+
+    pub fn rlc(& mut self, value: u8) -> u8 {
+        let left_bit = value >> 7;
+        let ret = value.rotate_left(1);
+        self.update_rotate_flags(left_bit == 1, ret == 0);
+        ret
     }
 
     fn read_r8(&self, register: u8, bus: &Bus) -> u8 {
@@ -243,6 +250,27 @@ impl CPU {
             2 => self.hl(),
             3 => self.sp,
             _ => unreachable!("a 16 bit register selector is always two bits"),
+        }
+    }
+
+    fn read_r16stk(&mut self, register: u8) -> u16 {
+        match register {
+            0 => u16::from_be_bytes([self.b, self.c]),
+            1 => u16::from_be_bytes([self.d, self.e]),
+            2 => u16::from_be_bytes([self.h, self.l]),
+            3 => u16::from_be_bytes([self.a, self.f]),
+            _ => unreachable!("a 16 bit register selector is always two bits")
+        }
+    }
+    
+    fn write_r16stk(&mut self, register: u8, value: u16) {
+        match register {
+            0 => [self.b, self.c] = value.to_be_bytes(),
+            1 => [self.d, self.e] = value.to_be_bytes(),
+            2 => [self.h, self.l] = value.to_be_bytes(),
+            3 => {[self.a, self.f] = value.to_be_bytes(); self.f &= 0xF0},
+            _ => unreachable!("a 16 bit register selector is always two bits")
+
         }
     }
 
@@ -292,6 +320,31 @@ impl CPU {
 
     }
 
+    pub fn handle_cb(& mut self, opcode: u8, bus: &Bus) {
+
+        let register_index = opcode & 0b0000_0111;
+        match opcode {
+            0x00..0x08 => {
+                match register_index {
+                    0 => self.b = self.rlc(self.b),
+                    1 => self.c = self.rlc(self.c),
+                    2 => self.d = self.rlc(self.d),
+                    3 => self.e = self.rlc(self.e),
+                    4 => self.h = self.rlc(self.h),
+                    5 => self.l = self.rlc(self.l),
+                    6 => bus.write(self.hl(), self.rlc(bus.read(self.hl()))),
+                    7 => self.a = self.rlc(self.a),
+                    _ => unreachable!("an 8-bit register selector is always three bits"),
+                }
+            },
+            0x08..0x0F => {
+                
+            }
+            _ => unreachable!("Unreachable")
+        }
+        
+    }
+
 
     pub fn step(& mut self, bus: &Bus) {
 
@@ -306,16 +359,16 @@ impl CPU {
             // ld r16, imm16
             0x01 | 0x11 | 0x21 | 0x31 => {
                 let val = self.fetch_u16(bus);
-                self.write_r16(instr & 0b0011_0000, val);
+                self.write_r16((instr >> 4) & 0b11, val);
             },
             // ld [r16mem], a
             0x02 | 0x12 | 0x22 | 0x32 => {
-                let addr = self.read_r16(instr & 0b0011_0000);
+                let addr = self.read_r16((instr >> 4) & 0b11);
                 bus.write(addr, self.a)
             },
             // ld a, [r16mem]
             0x0A | 0x1A | 0x2A | 0x3A => { 
-                let addr = self.read_r16(instr & 0b0011_0000);
+                let addr = self.read_r16((instr >> 4) & 0b11);
                 self.a = bus.read(addr);
             },
             //ld [imm16], sp
@@ -335,26 +388,26 @@ impl CPU {
             },
             // inc r16 
             0x03 | 0x13 | 0x23 | 0x33 => {
-                let register = instr & 0b0011_0000;
+                let register = (instr >> 4) & 0b11;
                 let value = self.read_r16(register).wrapping_add(1);
                 self.write_r16(register, value);
             }
             // dec r16
             0x0B | 0x1B | 0x2B | 0x3B => {
-                let register = instr & 0b0011_0000;
+                let register = (instr >> 4) & 0b11;
                 let value = self.read_r16(register).wrapping_sub(1);
                 self.write_r16(register, value);
             },
 
-            0x09 | 0x19 | 0x29 | 0x39 => self.add_to_hl(self.read_r16(instr & 0b0011_0000)),
+            0x09 | 0x19 | 0x29 | 0x39 => self.add_to_hl(self.read_r16((instr >> 4) & 0b11)),
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
-                let register = instr & 0b0011_1000;
+                let register = (instr >> 3) & 0b111;
                 let value = self.inc_u8(self.read_r8(register, bus));
                 self.write_r8(register, value, bus);
             },
             // DEC r8
             0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
-                let register = instr & 0b0011_1000;
+                let register = (instr >> 3) & 0b111;
                 let value = self.dec_u8(self.read_r8(register, bus));
                 self.write_r8(register, value, bus);
             },
@@ -362,7 +415,7 @@ impl CPU {
             // ld r8, imm8	| 0 	0	 x  x  x	1	1	0 
             0x06 | 0x16 | 0x26 | 0x36 | 0x0E | 0x1E | 0x2E | 0x3E => {
                 let val = self.fetch_u8(bus);
-                let reg_index = instr & 0b0011_1000;
+                let reg_index = (instr >> 3) & 0b111;
                 self.write_r8(reg_index, val, bus);
             },
             0x07 => self.rlca(),
@@ -549,13 +602,32 @@ impl CPU {
                 bus.write(self.sp, low);
                 self.pc = tgt3;
             },
-            
+            0xC1 | 0xD1 | 0xE1 | 0xF1 => {
+            // POP
+                let register = (instr >> 4) & 0b11;
+                let low = bus.read(self.sp);
+                self.sp = self.sp.wrapping_add(1);
+                let high = bus.read(self.sp);
+                self.sp = self.sp.wrapping_add(1);
+                self.write_r16stk(register, u16::from_le_bytes([low, high]));
+            },
+            0xC5 | 0xD5 | 0xE5 | 0xF5 => {
+            // PUSH
+                let register = (instr >> 4) & 0b11;
+                let [low, high] = self.read_r16stk(register).to_le_bytes();
+                self.sp = self.sp.wrapping_sub(1);
+                bus.write(self.sp, high);
+                self.sp = self.sp.wrapping_sub(1);
+                bus.write(self.sp, low);
+            },
+            0xCB => { // CB prefix
+                let cb_instruction = self.fetch_u8(bus);
+                self.handle_cb(cb_instruction);
+            }
 
-
-
-
-
-
+            // 0 -> 34
+            // 1 -> 12
+            // bc = 1234
             _ => panic!("...")
             
         }

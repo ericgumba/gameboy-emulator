@@ -6,151 +6,252 @@ This project is currently focused on the Sharp SM83 CPU core. It can load a ROM
 into a cartridge and execute parts of the unprefixed instruction set, but it is
 not yet capable of running or displaying a game.
 
-## Project status
+Once the instruction set is implemented, focus on making it verifiably correct before starting graphics.
 
-Implemented or in progress:
+## Recommended order
 
-- SM83 register storage: `A`, `F`, `B`, `C`, `D`, `E`, `H`, `L`, `SP`, and `PC`
-- Combined `BC`, `DE`, and `HL` register access
-- Instruction and little-endian immediate-value fetching
-- CPU flag manipulation for zero, subtract, half-carry, and carry
-- Portions of the unprefixed opcode table, including loads, arithmetic, jumps,
-  returns, rotates, and miscellaneous accumulator operations
-- Pattern-based decoding for the `0x40..=0x7F` register-load block
-- Basic `HALT` state tracking
-- Loading ROM bytes from a file
-- Unit tests for the `DAA` instruction
+### 1. Finish writable memory and the bus
 
-Major pieces still missing:
+This is your immediate next step because `Bus::write()` is currently unimplemented. Give the bus storage for:
 
-- A complete and verified CPU instruction set
-- The `0xCB`-prefixed instruction table
-- Accurate instruction timing and machine-cycle accounting
-- Interrupts, the interrupt master enable flag, and complete `HALT`/`STOP`
-  behavior
-- Writable memory and the full Game Boy memory map
-- Cartridge memory-bank controllers and external cartridge RAM
-- Timers, serial I/O, joypad input, DMA, and hardware registers
-- PPU/video output and APU/audio output
-- A working emulator loop in the binary target
+- VRAM
+- Work RAM
+- OAM
+- I/O registers
+- High RAM
+- Interrupt-enable register
 
-`Bus::write` is currently `unimplemented!()`. Any instruction that writes to
-memory will therefore panic. The code should be treated as a work in progress,
-not as a compatible emulator.
+The official address ranges are documented in [Pan Docs’ memory map](https://gbdev.io/pandocs/Memory_Map.html).
 
-## Code layout
+The basic design will look something like:
+
+```rust
+pub struct Bus {
+    cartridge: Cartridge,
+    vram: [u8; 0x2000],
+    wram: [u8; 0x2000],
+    oam: [u8; 0xA0],
+    io: [u8; 0x80],
+    hram: [u8; 0x7F],
+    interrupt_enable: u8,
+}
+```
+
+Writes mutate memory, so change the API to:
+
+```rust
+pub fn write(&mut self, addr: u16, value: u8)
+```
+
+and CPU execution to:
+
+```rust
+pub fn step(&mut self, bus: &mut Bus)
+```
+
+Start with ordinary arrays and simple address routing. Hardware-specific restrictions can be added later.
+
+### 2. Thoroughly test the CPU
+
+“Every opcode has a match arm” does not necessarily mean the CPU is correct. Test:
+
+- Result values
+- `Z`, `N`, `H`, and `C` flags
+- `PC` advancement
+- Stack behavior
+- Memory side effects
+- Taken and untaken conditional instructions
+- Boundary values such as `0x00`, `0x0F`, `0x7F`, `0x80`, and `0xFF`
+- 16-bit wrapping
+- All `0xCB`-prefixed instructions
+
+Before considering the CPU complete, audit your bit selectors. A selector helper expects `0..=3` or `0..=7`, so masked bits usually need shifting:
+
+```rust
+let r16 = (instr >> 4) & 0b11;
+let r8 = (instr >> 3) & 0b111;
+```
+
+Also consider changing `get_flag()` to return `bool`. Its current masked `u8` return value makes mistakes such as this easy:
+
+```rust
+self.get_flag(FLAG_Z) == 1
+```
+
+A set `Z` flag is actually `0x80`, not `1`.
+
+```rust
+fn get_flag(&self, flag: u8) -> bool {
+    self.f & flag != 0
+}
+```
+
+Then condition checks become clearer:
+
+```rust
+1 => self.get_flag(FLAG_Z),
+3 => self.get_flag(FLAG_C),
+```
+
+### 3. Track instruction timing
+
+Change `CPU::step()` to return the number of cycles consumed:
+
+```rust
+pub fn step(&mut self, bus: &mut Bus) -> u8 {
+    let opcode = self.fetch_u8(bus);
+
+    match opcode {
+        0x00 => 1, // NOP: one machine cycle
+        // ...
+    }
+}
+```
+
+Conditional instructions have different timing depending on whether the branch was taken.
+
+Choose one unit—machine cycles or clock cycles—and use it consistently. For a DMG Game Boy:
 
 ```text
-src/
-├── cpu.rs        CPU state, flags, instruction helpers, and opcode dispatch
-├── bus.rs        Address-bus interface between the CPU and cartridge
-├── cartridge.rs  ROM file loading and ROM byte reads
-├── lib.rs        Public library modules
-└── main.rs       Placeholder binary entry point
+1 machine cycle = 4 clock cycles/dots
 ```
 
-### CPU
+Other components then advance from the CPU’s elapsed cycles:
 
-`CPU::step` executes one instruction:
+```rust
+let cycles = cpu.step(&mut bus);
+bus.tick(cycles);
+```
 
-1. Return immediately if the CPU is halted.
-2. Read the opcode at `PC` through the bus.
-3. Increment `PC`.
-4. Decode and execute the opcode.
-5. Fetch additional immediate bytes when required.
+Timing drives timers, interrupts, graphics, audio, and DMA, so it should be established before those components.
 
-The CPU starts at `0x0100`, the cartridge entry point used when boot-ROM
-execution is skipped. The rest of the initial register state is not yet a full
-post-boot hardware state.
+### 4. Add serial test output
 
-The Game Boy flag register uses its upper four bits:
-
-| Bit | Flag | Meaning |
-| ---: | :--- | :------ |
-| 7 | `Z` | The result was zero |
-| 6 | `N` | The last operation was a subtraction |
-| 5 | `H` | Carry or borrow across bit 3 |
-| 4 | `C` | Carry or borrow across bit 7 |
-
-Several opcode families encode registers directly in their bits. For example,
-the register-to-register load block has the form:
+Implement minimal handling for:
 
 ```text
-01 ddd sss
-   │   └── source register
-   └────── destination register
+0xFF01: SB — serial data
+0xFF02: SC — serial control
 ```
 
-The three-bit register selector is:
+Blargg’s tests write output characters to `SB` and then write `$81` to `SC`, making it possible to print test results in your terminal without having a PPU. [Blargg’s CPU tests](https://github.com/retrio/gb-test-roms/blob/master/cpu_instrs/readme.txt) exercise instructions with boundary values and verify that unrelated registers remain unchanged.
 
-| Value | Register |
-| ----: | :------- |
-| `0` | `B` |
-| `1` | `C` |
-| `2` | `D` |
-| `3` | `E` |
-| `4` | `H` |
-| `5` | `L` |
-| `6` | Memory at `(HL)` |
-| `7` | `A` |
+Start with the individual ROMs already in your repository:
 
-For example, `0x51` is `01 010 001`, so it decodes to `LD D, C`. The
-`read_r8` and `write_r8` helpers allow the entire load family to share one
-implementation instead of using a separate match arm for every register pair.
-Opcode `0x76` is the exception: it represents `HALT`.
-
-### Bus
-
-The bus is intended to own the system components and route CPU reads and writes
-according to the Game Boy memory map. At present, it only forwards reads to the
-cartridge. RAM and memory-mapped hardware still need to be added.
-
-### Cartridge
-
-`Cartridge::new` reads a ROM file into a `Vec<u8>`. `Cartridge::read` currently
-indexes that vector directly, so there is no header parsing, bounds handling,
-RAM, or bank switching yet.
-
-## Building and testing
-
-The crate uses Rust 2024 edition. Install a recent stable Rust toolchain, then
-check the library with:
-
-```bash
-cargo check --lib
+```text
+blarg/cpu_instrs/individual/
 ```
 
-Run the current unit tests with:
+Then try the combined ROM:
 
-```bash
-cargo test --lib
+```text
+blarg/cpu_instrs/cpu_instrs.gb
 ```
 
-The binary in `src/main.rs` is not wired into a working CPU loop yet, so
-`cargo run` and the full `cargo test` command are not expected to succeed at
-this stage.
+Your first major milestone should be:
 
-## Test ROMs
+```text
+Blargg cpu_instrs: Passed
+```
 
-The repository contains Blargg's CPU instruction test ROMs under
-`blarg/cpu_instrs/`. The individual ROMs are useful because each one targets a
-smaller instruction category, making failures easier to diagnose than the
-combined `cpu_instrs.gb` ROM.
+### 5. Implement timers and interrupts
 
-These ROMs cannot pass yet. They require substantially more CPU coverage,
-writable work RAM, interrupts and timing behavior, and a way to capture output
-from the serial registers or display.
+Add:
 
-## Suggested development order
+- `DIV`
+- `TIMA`
+- `TMA`
+- `TAC`
+- Interrupt request register `IF`
+- Interrupt enable register `IE`
+- Interrupt master enable state
+- `DI`, `EI`, and delayed `EI` behavior
+- `RETI`
+- Interrupt vectors
+- Proper `HALT` behavior
 
-1. Implement writable work RAM and route the basic memory map through `Bus`.
-2. Add table-driven tests for every implemented opcode, including flags and
-   boundary values.
-3. Complete all unprefixed CPU instructions.
-4. Implement the `0xCB`-prefixed instructions.
-5. Track instruction cycles and implement timers and interrupts.
-6. Capture serial output and begin running the individual Blargg ROMs.
-7. Add cartridge banking, PPU rendering, input, and audio.
+The timer advances alongside CPU cycles, and `TIMA` overflow reloads `TMA` and requests a timer interrupt. [Pan Docs timer reference](https://gbdev.io/pandocs/Timer_and_Divider_Registers.html)
+
+Afterward, use the [Mooneye acceptance tests](https://github.com/Gekkio/mooneye-test-suite) for timers, interrupts, hardware sequencing, and model-specific behavior.
+
+### 6. Implement cartridge types
+
+Begin with:
+
+1. ROM-only cartridges
+2. Cartridge-header parsing
+3. MBC1
+4. MBC3 and its real-time clock
+5. MBC5
+6. Battery-backed save RAM
+
+Do not try to implement every memory-bank controller immediately. ROM-only and MBC1 are enough for early progress.
+
+### 7. Implement the PPU
+
+Build graphics incrementally:
+
+1. LCD registers
+2. `LY` scanline progression
+3. PPU modes
+4. Background tiles
+5. Scrolling
+6. Window layer
+7. Sprites
+8. Palettes
+9. OAM DMA
+10. Access restrictions during PPU modes
+
+Render into a simple framebuffer:
+
+```rust
+pub struct Ppu {
+    framebuffer: [u8; 160 * 144],
+}
+```
+
+Get a static background visible first. Pixel-perfect timing can improve afterward, although PPU timing eventually matters because VRAM and OAM access depend on the current mode. [Pan Docs rendering reference](https://gbdev.io/pandocs/Rendering.html)
+
+### 8. Add a frontend and input
+
+Once the PPU produces complete frames:
+
+- Open a `160 × 144` window
+- Scale it by an integer such as `4×`
+- Copy the framebuffer to the window
+- Map keyboard buttons to the joypad register
+- Limit execution to approximately the Game Boy’s frame rate
+
+Keep the emulator core independent of the windowing library. The core should produce frames and accept button state; the frontend should display those frames.
+
+### 9. Add audio last
+
+The APU is relatively self-contained but nuanced. You can play and test games without audio, so it is usually more productive to implement it after CPU, bus, interrupts, timers, PPU, and input.
+
+## Practical milestone list
+
+A satisfying progression would be:
+
+```text
+CPU unit tests pass
+        ↓
+Blargg CPU tests pass in terminal
+        ↓
+Timer and interrupt tests pass
+        ↓
+First static background appears
+        ↓
+Sprites and scrolling work
+        ↓
+Joypad input works
+        ↓
+First ROM-only or MBC1 game runs
+        ↓
+Audio and accuracy improvements
+```
+
+For your codebase specifically, I would implement writable WRAM/HRAM and `Bus::write()` next. Without that, stack instructions, calls, returns, test ROMs, and nearly every real program remain blocked.
 
 Useful behavior references include [Pan Docs](https://gbdev.io/pandocs/) and
 the [Game Boy opcode table](https://gbdev.io/gb-opcodes/optables/).
+
