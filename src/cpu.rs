@@ -22,7 +22,7 @@ pub struct CPU {
 impl CPU {
 
     fn get_flag(&self, flag: u8) -> u8 {
-        self.f & flag
+        u8::from(self.f & flag != 0)
     }
 
     fn set_flag(&mut self, flag: u8, val: bool) {
@@ -203,6 +203,23 @@ impl CPU {
         self.update_rotate_flags(left_bit == 1, false);
     }
 
+    fn rl(&mut self, value: u8) -> u8 {
+        let left_bit = value >> 7;
+        let old_carry = self.get_flag(FLAG_C);
+        let ret = value << 1 | old_carry;
+        self.update_rotate_flags(left_bit == 1, ret == 0);
+        ret
+    }
+
+    fn sla(&mut self, value: u8) -> u8 {
+        let left_bit = value >> 7;
+        let ret = value << 1;
+        self.update_rotate_flags(left_bit == 1, ret == 0);
+        ret
+    }
+
+
+
     fn rra(&mut self) {
         let right_bit = self.a & 0x1;
         let old_carry = self.get_flag(FLAG_C);
@@ -210,10 +227,39 @@ impl CPU {
         self.update_rotate_flags(right_bit == 1, false);
     }
 
+    fn rr(&mut self, value: u8) -> u8 {
+        let right_bit = value & 1;
+        let old_carry = self.get_flag(FLAG_C);
+        let ret = value >> 1 | old_carry << 7;
+        self.update_rotate_flags(right_bit == 1, ret == 0);
+        ret
+    }
+    fn sra(&mut self, value: u8) -> u8 {
+        let right_bit = value & 1;
+        let left_bit = value >> 7;
+        let ret = value >> 1 | left_bit << 7;
+        self.update_rotate_flags(right_bit == 1, ret == 0);
+        ret
+    }
+
+    fn srl(&mut self, value: u8) -> u8 {
+        let right_bit = value & 1;
+        let ret = value >> 1;
+        self.update_rotate_flags(right_bit == 1, ret == 0);
+        ret
+    }
+
     fn rlca(&mut self) {
         let left_bit = self.a >> 7;
         self.a = self.a.rotate_left(1);
         self.update_rotate_flags(left_bit == 1, false);
+    }
+    
+    pub fn rlc(& mut self, value: u8) -> u8 {
+        let left_bit = value >> 7;
+        let ret = value.rotate_left(1);
+        self.update_rotate_flags(left_bit == 1, ret == 0);
+        ret
     }
 
     fn rrca(&mut self) {
@@ -222,12 +268,27 @@ impl CPU {
         self.update_rotate_flags(right_bit == 1, false);
     }
 
-    pub fn rlc(& mut self, value: u8) -> u8 {
-        let left_bit = value >> 7;
-        let ret = value.rotate_left(1);
-        self.update_rotate_flags(left_bit == 1, ret == 0);
+    fn rrc(&mut self, value: u8) -> u8 {
+        let right_bit = value & 0x1;
+        let ret = value.rotate_right(1);
+        self.update_rotate_flags(right_bit == 1, ret == 0);
         ret
     }
+
+    // 1010 0110
+
+    fn swap(&mut self, value: u8) -> u8 { 
+        let result = value.rotate_left(4);
+
+        self.set_flag(FLAG_Z, result == 0);
+        self.set_flag(FLAG_N, false);
+        self.set_flag(FLAG_H, false);
+        self.set_flag(FLAG_C, false);
+
+        result
+    }
+
+ 
 
     fn read_r8(&self, register: u8, bus: &Bus) -> u8 {
         match register {
@@ -319,30 +380,49 @@ impl CPU {
         self.set_flag(FLAG_C, self.a < reg);
 
     }
-
-    pub fn handle_cb(& mut self, opcode: u8, bus: &Bus) {
-
-        let register_index = opcode & 0b0000_0111;
+    pub fn execute_cb_operation(&mut self, value: u8, opcode: u8) -> u8 {
         match opcode {
-            0x00..0x08 => {
-                match register_index {
-                    0 => self.b = self.rlc(self.b),
-                    1 => self.c = self.rlc(self.c),
-                    2 => self.d = self.rlc(self.d),
-                    3 => self.e = self.rlc(self.e),
-                    4 => self.h = self.rlc(self.h),
-                    5 => self.l = self.rlc(self.l),
-                    6 => bus.write(self.hl(), self.rlc(bus.read(self.hl()))),
-                    7 => self.a = self.rlc(self.a),
-                    _ => unreachable!("an 8-bit register selector is always three bits"),
-                }
+            0x00..0x08 => self.rlc(value),
+            0x08..0x10 => self.rrc(value),
+            0x10..0x18 => self.rl(value),
+            0x18..0x20 => self.rr(value),
+            0x20..0x28 => self.sla(value),
+            0x28..0x30 => self.sra(value),
+            0x30..0x38 => self.swap(value),
+            0x38..0x40 => self.srl(value),
+            _ => unreachable!("")
+        }
+
+    }
+
+    pub fn cb_bit_op(&mut self, value: u8, opcode: u8) {
+        let bit_op = opcode >> 6;
+        let bit_index = opcode >> 3 & 0b111;
+        match bit_op {
+            1 => {
+                self.set_flag(FLAG_Z, ((value >> bit_index) & 1) == 0);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(FLAG_H, true);
             },
-            0x08..0x0F => {
-                
-            }
-            _ => unreachable!("Unreachable")
+            2 => {},
+            3 => {},
+            _ => unreachable!("")
+
         }
         
+    }
+
+    pub fn handle_cb(& mut self, opcode: u8, bus: &Bus) {
+        let register_index = opcode & 0b0000_0111;
+        let is_bit_index_op = opcode >> 6 != 0;
+        let value = self.read_r8(register_index, bus);
+        if is_bit_index_op {
+            self.cb_bit_op(value, opcode);
+        }
+        else {
+            let res = self.execute_cb_operation(value, opcode);
+            self.write_r8(register_index, res, bus);
+        }
     }
 
 
@@ -622,7 +702,7 @@ impl CPU {
             },
             0xCB => { // CB prefix
                 let cb_instruction = self.fetch_u8(bus);
-                self.handle_cb(cb_instruction);
+                self.handle_cb(cb_instruction, bus);
             }
 
             // 0 -> 34
