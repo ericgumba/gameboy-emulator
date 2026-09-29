@@ -6,7 +6,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
 
     let bus: Bus = Bus::new(cartridge);
 
-    bus.step();
 
 
 

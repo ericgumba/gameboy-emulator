@@ -46,6 +46,7 @@ impl CPU {
             sp: 0,
             pc: 0x100, // Or 0x0100 for a post-bootrom Game Boy state
             halted: false,
+            
         }
     }
 
@@ -395,7 +396,7 @@ impl CPU {
 
     }
 
-    pub fn cb_bit_op(&mut self, value: u8, opcode: u8) {
+    pub fn cb_bit_op(&mut self, value: u8, opcode: u8) -> Option<u8> {
         let bit_op = opcode >> 6;
         let bit_index = opcode >> 3 & 0b111;
         match bit_op {
@@ -403,9 +404,15 @@ impl CPU {
                 self.set_flag(FLAG_Z, ((value >> bit_index) & 1) == 0);
                 self.set_flag(FLAG_N, false);
                 self.set_flag(FLAG_H, true);
+                None
             },
-            2 => {},
-            3 => {},
+            2 => {
+                Some(value & !(1u8 << bit_index))
+            },
+            3 => {
+
+                Some(value | (1u8 << bit_index))
+            },
             _ => unreachable!("")
 
         }
@@ -417,7 +424,10 @@ impl CPU {
         let is_bit_index_op = opcode >> 6 != 0;
         let value = self.read_r8(register_index, bus);
         if is_bit_index_op {
-            self.cb_bit_op(value, opcode);
+            let res = self.cb_bit_op(value, opcode);
+            if res.is_some() {
+                self.write_r8(register_index, value, bus);
+            }
         }
         else {
             let res = self.execute_cb_operation(value, opcode);
@@ -703,8 +713,41 @@ impl CPU {
             0xCB => { // CB prefix
                 let cb_instruction = self.fetch_u8(bus);
                 self.handle_cb(cb_instruction, bus);
-            }
+            },
+            0xE2 => {
+                bus.write(0xFF00 + self.c as u16, self.a);
+            },
+            0xE0 => {
+                let addr_offset = self.fetch_u8(bus);
+                bus.write(0xFF00 + addr_offset as u16, self.a);
+            },
+            0xEA => {
+                let address = self.fetch_u16(bus);
+                bus.write(address, self.a);
+            },
+            0xF2 => {
+                let val = bus.read(0xFF00 + self.c as u16);
+                self.a = val;
+            },
+            0xF0 => {
+                self.a = self.fetch_u8(bus);
+            },
+            0xFA => {
+                self.a = bus.read(self.fetch_u16(bus));
+            },
+            0xE8 => {
+                let offset = self.fetch_u8(bus) as i8;
+                self.sp = self.sp.wrapping_add_signed(offset as i16);
+            },
 
+            0xF8 => {
+                let offset = self.fetch_u8(bus) as i8;
+                let value = self.sp.wrapping_add_signed(offset as i16);
+                [self.h, self.l] = value.to_be_bytes();
+            },
+            0xF9 => {
+                self.sp = self.hl();
+            },
             // 0 -> 34
             // 1 -> 12
             // bc = 1234
