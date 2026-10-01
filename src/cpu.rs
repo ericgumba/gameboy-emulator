@@ -52,6 +52,8 @@ impl CPU {
         }
     }
 
+    pub fn halted(& self) -> bool {self.halted}
+
     // imm8 = fetch_u8
     // imm16 = call fetch_u8 twice
     fn fetch_u8<M: Memory>(&mut self, bus: &mut M) -> u8 {
@@ -934,6 +936,21 @@ mod tests {
 
         (cpu, memory)
     }
+
+    #[test]
+    fn ld_imm16_sp() {
+        let (mut cpu, mut memory) = system_with_program(&[0x08, 0x34, 0x12]);
+        cpu.sp = 0xF88F;
+        let cycles = cpu.step(&mut memory);
+        assert_eq!(memory.bytes[0x1234], 0x8F);
+        assert_eq!(memory.bytes[0x1235], 0xF8);
+
+        assert_eq!(cycles, 5)
+
+
+    }
+
+
     //
             // 0x01 | 0x11 | 0x21 | 0x31 => {
             //     let val = self.fetch_u16(bus);
@@ -996,6 +1013,40 @@ mod tests {
             let cycles = cpu.step(&mut memory);
 
             assert_eq!(cpu.a, 69);
+
+            if cpu.h != 0 || cpu.l != 0 {
+                assert_eq!(cpu.h, 0x34);
+                assert!(cpu.l == 0x11 || cpu.l == 0x13);
+            }
+
+            assert_eq!(cycles, 2, "incorrect cycles for opcode {opcode:#04X}"); 
+        }
+    }
+
+    #[test]
+    fn ld_r16mem_a() {
+        let cases = [
+            (0x02, [0x34, 0x12, 0x00, 0x00, 0x00, 0x00]),
+            (0x12, [0x00, 0x00, 0x34, 0x12, 0x00, 0x00]),
+            (0x22, [0x00, 0x00, 0x00, 0x00, 0x34, 0x12]),
+            (0x32, [0x00, 0x00, 0x00, 0x00, 0x34, 0x12]),
+        ];
+
+        for (opcode, expected_registers) in cases {
+            let (mut cpu, mut memory) =
+                system_with_program(&[opcode]);
+            cpu.a = 70;
+            [cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l] = expected_registers;
+
+            let cycles = cpu.step(&mut memory);
+
+            assert_eq!(memory.bytes[0x3412], 70);
+
+            if cpu.h != 0 || cpu.l != 0 {
+                assert_eq!(cpu.h, 0x34);
+                assert!(cpu.l == 0x11 || cpu.l == 0x13);
+            }
+
             assert_eq!(cycles, 2, "incorrect cycles for opcode {opcode:#04X}"); 
         }
     }
@@ -1106,6 +1157,7 @@ mod tests {
         assert_eq!(cpu.get_flag(FLAG_H), 0);
         assert_eq!(cpu.get_flag(FLAG_N), 0);
     }
+
 
     #[test]
     fn daa_subtracts_adjustment_and_preserves_subtract_and_carry() {

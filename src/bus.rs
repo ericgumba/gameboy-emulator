@@ -20,8 +20,8 @@ impl Memory for Bus {
     fn read(&mut self, addr: u16) -> u8 {
         self.cartridge.read(addr)
     }
-    fn write(&mut self, addr: u16, val: u8) {
-        unimplemented!();
+    fn write(&mut self, _addr: u16, _val: u8) {
+        unimplemented!(); 
     }
     
 }
