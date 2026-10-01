@@ -1,4 +1,4 @@
-use crate::bus::Bus;
+use crate::bus::Memory;
 
 const FLAG_C: u8 = 1 << 4;
 const FLAG_H: u8 = 1 << 5;
@@ -17,6 +17,7 @@ pub struct CPU {
     sp: u16,
     pc: u16,
     halted: bool,
+    ime: bool
 }
 
 impl CPU {
@@ -46,23 +47,25 @@ impl CPU {
             sp: 0,
             pc: 0x100, // Or 0x0100 for a post-bootrom Game Boy state
             halted: false,
+            ime: false
             
         }
     }
 
     // imm8 = fetch_u8
     // imm16 = call fetch_u8 twice
-    pub fn fetch_u8(&mut self, bus: &Bus) -> u8 {
+    fn fetch_u8<M: Memory>(&mut self, bus: &mut M) -> u8 {
         let byte = bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         byte
     }
-    pub fn fetch_u16(&mut self, bus: &Bus) -> u16 {
+    fn fetch_u16<M: Memory>(&mut self, bus: &mut M) -> u16 {
         let low = self.fetch_u8(bus);
         let high = self.fetch_u8(bus);
         u16::from_le_bytes([low, high])
 
     }
+
     fn inc_u8(&mut self, value: u8) -> u8 {
         let result = value.wrapping_add(1);
 
@@ -141,6 +144,23 @@ impl CPU {
         self.set_flag(FLAG_H, half_carry);
         self.set_flag(FLAG_N, false);
 
+    }
+
+    fn add_sp_offset(&mut self, offset: u8) -> u16 {
+        let sp = self.sp;
+
+        self.set_flag(FLAG_Z, false);
+        self.set_flag(FLAG_N, false);
+        self.set_flag(
+            FLAG_H,
+            (sp & 0x000F) + u16::from(offset & 0x0F) > 0x000F,
+        );
+        self.set_flag(
+            FLAG_C,
+            (sp & 0x00FF) + u16::from(offset) > 0x00FF,
+        );
+
+        sp.wrapping_add_signed(i16::from(offset as i8))
     }
 
     fn update_bitwise_flags(&mut self, h_flag_val: bool) {
@@ -291,7 +311,7 @@ impl CPU {
 
  
 
-    fn read_r8(&self, register: u8, bus: &Bus) -> u8 {
+    fn read_r8<M: Memory>(&self, register: u8, bus: &mut M) -> u8 {
         match register {
             0 => self.b,
             1 => self.c,
@@ -313,6 +333,26 @@ impl CPU {
             3 => self.sp,
             _ => unreachable!("a 16 bit register selector is always two bits"),
         }
+    }
+
+    fn read_r16mem(&mut self, register: u8) -> u16 {
+        let ret = match register {
+            0 => self.bc(),
+            1 => self.de(),
+            2 => {
+                let ret = self.hl();
+                self.write_r16(2, ret.wrapping_add(1));
+                ret
+            },
+            3 => {
+                let ret = self.hl();
+                self.write_r16(2, ret.wrapping_sub(1));
+                ret
+            },
+            _ => unreachable!("a 16 bit register selector is always two bits"),
+        };
+
+        ret
     }
 
     fn read_r16stk(&mut self, register: u8) -> u16 {
@@ -347,7 +387,7 @@ impl CPU {
         }
     }
 
-    fn write_r8(&mut self, register: u8, value: u8, bus: &Bus) {
+    fn write_r8<M: Memory>(&mut self, register: u8, value: u8, bus: &mut M) {
         match register {
             0 => self.b = value,
             1 => self.c = value,
@@ -373,7 +413,7 @@ impl CPU {
 
     }
 
-    pub fn compare_a(&mut self, reg: u8) {
+    fn compare_a(&mut self, reg: u8) {
         let val = self.a.wrapping_sub(reg);
         self.set_flag(FLAG_Z, val == 0);
         self.set_flag(FLAG_N, true);
@@ -381,7 +421,7 @@ impl CPU {
         self.set_flag(FLAG_C, self.a < reg);
 
     }
-    pub fn execute_cb_operation(&mut self, value: u8, opcode: u8) -> u8 {
+    fn execute_cb_operation(&mut self, value: u8, opcode: u8) -> u8 {
         match opcode {
             0x00..0x08 => self.rlc(value),
             0x08..0x10 => self.rrc(value),
@@ -396,7 +436,7 @@ impl CPU {
 
     }
 
-    pub fn cb_bit_op(&mut self, value: u8, opcode: u8) -> Option<u8> {
+    fn cb_bit_op(&mut self, value: u8, opcode: u8) -> Option<u8> {
         let bit_op = opcode >> 6;
         let bit_index = opcode >> 3 & 0b111;
         match bit_op {
@@ -419,346 +459,628 @@ impl CPU {
         
     }
 
-    pub fn handle_cb(& mut self, opcode: u8, bus: &Bus) {
+    fn handle_cb<M: Memory>(&mut self, opcode: u8, bus: &mut M) -> u8 {
         let register_index = opcode & 0b0000_0111;
         let is_bit_index_op = opcode >> 6 != 0;
         let value = self.read_r8(register_index, bus);
         if is_bit_index_op {
-            let res = self.cb_bit_op(value, opcode);
-            if res.is_some() {
-                self.write_r8(register_index, value, bus);
+            if let Some(result) = self.cb_bit_op(value, opcode) {
+                self.write_r8(register_index, result, bus);
             }
         }
         else {
             let res = self.execute_cb_operation(value, opcode);
             self.write_r8(register_index, res, bus);
         }
+
+        if register_index != 6 {
+            2
+        } else if opcode >> 6 == 1 {
+            3
+        } else {
+            4
+        }
     }
 
 
-    pub fn step(& mut self, bus: &Bus) {
-
+    pub fn step<M: Memory>(&mut self, bus: &mut M) -> u8 {
         if self.halted {
-            return;
+            return 1;
         }
 
         let instr = self.fetch_u8(bus);
 
         match instr {
-            0x00 => { }, // nop
-            // ld r16, imm16
+            0x00 => 1, // NOP
+            // LD r16, imm16
             0x01 | 0x11 | 0x21 | 0x31 => {
                 let val = self.fetch_u16(bus);
                 self.write_r16((instr >> 4) & 0b11, val);
-            },
-            // ld [r16mem], a
+                3
+            }
+            // LD [r16mem], A
             0x02 | 0x12 | 0x22 | 0x32 => {
-                let addr = self.read_r16((instr >> 4) & 0b11);
-                bus.write(addr, self.a)
-            },
-            // ld a, [r16mem]
-            0x0A | 0x1A | 0x2A | 0x3A => { 
-                let addr = self.read_r16((instr >> 4) & 0b11);
+                let addr = self.read_r16mem((instr >> 4) & 0b11);
+                bus.write(addr, self.a);
+                2
+            }
+            // LD A, [r16mem]
+            0x0A | 0x1A | 0x2A | 0x3A => {
+                let addr = self.read_r16mem((instr >> 4) & 0b11);
                 self.a = bus.read(addr);
-            },
-            //ld [imm16], sp
-
-            0x08 => { 
+                2
+            }
+,
+            // LD [imm16], SP
+            0x08 => {
                 let addr = self.fetch_u16(bus);
-                
-                // 0x1234
-                let high_sp = (self.sp >> 8) as u8; // 0x12
-                let low_sp = (self.sp & 0x00FF) as u8; // 0x34
+                let [low, high] = self.sp.to_le_bytes();
+                bus.write(addr, low);
+                bus.write(addr.wrapping_add(1), high);
+                5
+            }
 
-                bus.write(addr, low_sp);
-                bus.write(addr.wrapping_add(1), high_sp);
-
-
-
-            },
-            // inc r16 
+            // INC r16
             0x03 | 0x13 | 0x23 | 0x33 => {
                 let register = (instr >> 4) & 0b11;
                 let value = self.read_r16(register).wrapping_add(1);
                 self.write_r16(register, value);
+                2
             }
-            // dec r16
+
+            // DEC r16
             0x0B | 0x1B | 0x2B | 0x3B => {
                 let register = (instr >> 4) & 0b11;
                 let value = self.read_r16(register).wrapping_sub(1);
                 self.write_r16(register, value);
-            },
-
-            0x09 | 0x19 | 0x29 | 0x39 => self.add_to_hl(self.read_r16((instr >> 4) & 0b11)),
+                2
+            }
+            // ADD HL, r16
+            0x09 | 0x19 | 0x29 | 0x39 => {
+                let value = self.read_r16((instr >> 4) & 0b11);
+                self.add_to_hl(value);
+                2
+            }
+            // INC r8
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 let register = (instr >> 3) & 0b111;
-                let value = self.inc_u8(self.read_r8(register, bus));
-                self.write_r8(register, value, bus);
-            },
+                let value = self.read_r8(register, bus);
+                let result = self.inc_u8(value);
+                self.write_r8(register, result, bus);
+                if register == 6 { 3 } else { 1 }
+            }
             // DEC r8
             0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
                 let register = (instr >> 3) & 0b111;
-                let value = self.dec_u8(self.read_r8(register, bus));
-                self.write_r8(register, value, bus);
-            },
-            
-            // ld r8, imm8	| 0 	0	 x  x  x	1	1	0 
+                let value = self.read_r8(register, bus);
+                let result = self.dec_u8(value);
+                self.write_r8(register, result, bus);
+                if register == 6 { 3 } else { 1 }
+            }
+            // LD r8, imm8
             0x06 | 0x16 | 0x26 | 0x36 | 0x0E | 0x1E | 0x2E | 0x3E => {
-                let val = self.fetch_u8(bus);
-                let reg_index = (instr >> 3) & 0b111;
-                self.write_r8(reg_index, val, bus);
-            },
-            0x07 => self.rlca(),
-            0x0F => self.rrca(),
-            0x17 => self.rla(),
-            0x1F => self.rra(),
-            0x27 => self.daa(),
-            0x2F => self.cpl(),
+                let value = self.fetch_u8(bus);
+                let register = (instr >> 3) & 0b111;
+                self.write_r8(register, value, bus);
+                if register == 6 { 3 } else { 2 }
+            }
+            0x07 => {
+                self.rlca();
+                1
+            }
+            0x0F => {
+                self.rrca();
+                1
+            }
+            0x17 => {
+                self.rla();
+                1
+            }
+            0x1F => {
+                self.rra();
+                1
+            }
+            0x27 => {
+                self.daa();
+                1
+            }
+            0x2F => {
+                self.cpl();
+                1
+            }
             0x37 => {
                 self.set_flag(FLAG_C, true);
                 self.set_flag(FLAG_N, false);
                 self.set_flag(FLAG_H, false);
-            },
+                1
+            }
             0x3F => {
                 let carry = self.get_flag(FLAG_C) == 0;
                 self.set_flag(FLAG_C, carry);
                 self.set_flag(FLAG_N, false);
                 self.set_flag(FLAG_H, false);
-            },
+                1
+            }
             0x18 => {
                 let offset = self.fetch_u8(bus) as i8;
                 self.pc = self.pc.wrapping_add_signed(offset as i16);
-            },
-            //  0   1    2  3
-            // nz	z	nc	c
-
+                3
+            }
+            // JR cond, imm8
             0x20 | 0x28 | 0x30 | 0x38 => {
                 let offset = self.fetch_u8(bus) as i8;
-                match instr {
-                    0x20 => if self.get_flag(FLAG_Z) == 0 {
-                        self.pc = self.pc.wrapping_add_signed(offset as i16);
-                    },
-                    0x28 => if self.get_flag(FLAG_Z) == 1 {
-                        self.pc = self.pc.wrapping_add_signed(offset as i16)
-                    },
-                    0x30 => if self.get_flag(FLAG_C) == 0 {
-                        self.pc = self.pc.wrapping_add_signed(offset as i16)
-                    },
-                    0x38 => if self.get_flag(FLAG_C) == 1 {
-                        self.pc = self.pc.wrapping_add_signed(offset as i16)
-                    },
-                    _ => panic!("unreachable")
+                let condition = self.cond_flag((instr >> 3) & 0b11);
+                if condition {
+                    self.pc = self.pc.wrapping_add_signed(offset as i16);
+                    3
+                } else {
+                    2
                 }
-
-            },
-
-            0x10 => println!("St0p???"),
-            0x76 => self.halted = true,
-            // Block 1: 8-bit register-to-register loads
+            }
+            0x10 => {
+                println!("St0p???");
+                1
+            }
+            0x76 => {
+                self.halted = true;
+                1
+            }
+            // LD r8, r8
             0x40..=0x7F => {
-                let source = instr & 0b0000_0111;
-                let destination = (instr >> 3) & 0b0000_0111;
+                let source = instr & 0b111;
+                let destination = (instr >> 3) & 0b111;
                 let value = self.read_r8(source, bus);
-
                 self.write_r8(destination, value, bus);
-            },
-
-            // Block 2: 8-bit arithmetic
- 
-            // Document what operation we're carrying out as well
-
-            0x80..=0x87 => self.add_to_a(self.read_r8(instr & 0b0000_0111, bus)),
+                if source == 6 || destination == 6 { 2 } else { 1 }
+            }
+            // ADD A, r8
+            0x80..=0x87 => {
+                let source = instr & 0b111;
+                let value = self.read_r8(source, bus);
+                self.add_to_a(value);
+                if source == 6 { 2 } else { 1 }
+            }
+            // ADC A, r8
             0x88..=0x8F => {
+                let source = instr & 0b111;
                 let carry = self.get_flag(FLAG_C);
-                let r8_val_w_carry = self.read_r8(instr & 0b0000_0111, bus).wrapping_add(carry);
-                self.add_to_a(r8_val_w_carry);
-            },
-            0x90..=0x97 => self.sub_from_a(self.read_r8(instr & 0b0000_0111, bus)), 
+                let value = self.read_r8(source, bus).wrapping_add(carry);
+                self.add_to_a(value);
+                if source == 6 { 2 } else { 1 }
+            }
+            // SUB A, r8
+            0x90..=0x97 => {
+                let source = instr & 0b111;
+                let value = self.read_r8(source, bus);
+                self.sub_from_a(value);
+                if source == 6 { 2 } else { 1 }
+            }
+            // SBC A, r8
             0x98..=0x9F => {
+                let source = instr & 0b111;
                 let carry = self.get_flag(FLAG_C);
-                let r8_val_w_carry = self.read_r8(instr & 0b0000_0111, bus).wrapping_sub(carry);
-                self.sub_from_a(r8_val_w_carry);
-            },
+                let value = self.read_r8(source, bus).wrapping_add(carry);
+                self.sub_from_a(value);
+                if source == 6 { 2 } else { 1 }
+            }
+            // AND A, r8
             0xA0..=0xA7 => {
-                self.a = self.a & self.read_r8(instr & 0b0000_0111, bus);
+                let source = instr & 0b111;
+                self.a &= self.read_r8(source, bus);
                 self.update_bitwise_flags(true);
-            },
+                if source == 6 { 2 } else { 1 }
+            }
+            // XOR A, r8
             0xA8..=0xAF => {
-                self.a = self.a ^ self.read_r8(instr & 0b0000_0111, bus);
+                let source = instr & 0b111;
+                self.a ^= self.read_r8(source, bus);
                 self.update_bitwise_flags(false);
-            },
+                if source == 6 { 2 } else { 1 }
+            }
+            // OR A, r8
             0xB0..=0xB7 => {
-                self.a = self.a | self.read_r8(instr & 0b0000_0111, bus);
+                let source = instr & 0b111;
+                self.a |= self.read_r8(source, bus);
                 self.update_bitwise_flags(false);
-            },
-            0xB8..=0xBF => self.compare_a(self.read_r8(instr & 0b0000_0111, bus)),
-
-            // BLOCK 3
+                if source == 6 { 2 } else { 1 }
+            }
+            // CP A, r8
+            0xB8..=0xBF => {
+                let source = instr & 0b111;
+                let value = self.read_r8(source, bus);
+                self.compare_a(value);
+                if source == 6 { 2 } else { 1 }
+            }
+            // Arithmetic with immediate operands
             0xC6 => {
-                let val = self.fetch_u8(bus);
-                self.add_to_a(val);
-            },
+                let value = self.fetch_u8(bus);
+                self.add_to_a(value);
+                2
+            }
             0xCE => {
                 let carry = self.get_flag(FLAG_C);
-                let val = self.fetch_u8(bus).wrapping_add(carry);
-                self.add_to_a(val);
-            },
+                let value = self.fetch_u8(bus).wrapping_add(carry);
+                self.add_to_a(value);
+                2
+            }
             0xD6 => {
-                let val = self.fetch_u8(bus);
-                self.sub_from_a(val);
-            },
+                let value = self.fetch_u8(bus);
+                self.sub_from_a(value);
+                2
+            }
             0xDE => {
                 let carry = self.get_flag(FLAG_C);
-                let val = self.fetch_u8(bus).wrapping_sub(carry);
-                self.sub_from_a(val);
-            },
+                let value = self.fetch_u8(bus).wrapping_add(carry);
+                self.sub_from_a(value);
+                2
+            }
             0xE6 => {
-                let val = self.fetch_u8(bus);
-                self.a = self.a & val;
+                let value = self.fetch_u8(bus);
+                self.a &= value;
                 self.update_bitwise_flags(true);
-            },
+                2
+            }
             0xEE => {
-                let val = self.fetch_u8(bus);
-                self.a = self.a ^ val;
+                let value = self.fetch_u8(bus);
+                self.a ^= value;
                 self.update_bitwise_flags(false);
-            },
+                2
+            }
             0xF6 => {
-                let val = self.fetch_u8(bus);
-                self.a = self.a | val;
+                let value = self.fetch_u8(bus);
+                self.a |= value;
                 self.update_bitwise_flags(false);
+                2
             }
             0xFE => {
-                let val = self.fetch_u8(bus);
-                self.compare_a(val)
-            },
-            // ret cond
-
+                let value = self.fetch_u8(bus);
+                self.compare_a(value);
+                2
+            }
+            // RET cond
             0xC0 | 0xC8 | 0xD0 | 0xD8 => {
-                if self.cond_flag((instr & 0b0001_1000) >> 3) {
+                if self.cond_flag((instr >> 3) & 0b11) {
                     let low = bus.read(self.sp) as u16;
                     self.sp = self.sp.wrapping_add(1);
                     let high = bus.read(self.sp) as u16;
                     self.sp = self.sp.wrapping_add(1);
                     self.pc = (high << 8) | low;
+                    5
+                } else {
+                    2
                 }
-            },
+            }
             0xC9 => {
                 let low = bus.read(self.sp) as u16;
                 self.sp = self.sp.wrapping_add(1);
                 let high = bus.read(self.sp) as u16;
                 self.sp = self.sp.wrapping_add(1);
                 self.pc = (high << 8) | low;
-            },
-            0xD9 => println!("Implement reti!"),
+                4
+            }
+            0xD9 => {
+                println!("Implement reti!");
+                4
+            }
+            // JP cond, imm16
             0xC2 | 0xCA | 0xD2 | 0xDA => {
-                let val = self.fetch_u16(bus);
-
-                if !self.cond_flag((instr & 0b0001_1000) >> 3) {return}
-
-                self.pc = val;
-            },
-            0xC3 => self.pc = self.fetch_u16(bus),
-            0xE9 => self.pc = self.hl(),
+                let address = self.fetch_u16(bus);
+                if self.cond_flag((instr >> 3) & 0b11) {
+                    self.pc = address;
+                    4
+                } else {
+                    3
+                }
+            }
+            0xC3 => {
+                self.pc = self.fetch_u16(bus);
+                4
+            }
+            0xE9 => {
+                self.pc = self.hl();
+                1
+            }
+            // CALL cond, imm16
             0xC4 | 0xCC | 0xD4 | 0xDC => {
-                let flag_val = self.cond_flag((instr >> 3) & 0b11);
-                let addr = self.fetch_u16(bus);
-                let [low, high] = self.pc.to_le_bytes();
-
-                if flag_val {
+                let condition = self.cond_flag((instr >> 3) & 0b11);
+                let address = self.fetch_u16(bus);
+                if condition {
+                    let [low, high] = self.pc.to_le_bytes();
+                    self.sp = self.sp.wrapping_sub(1);
                     bus.write(self.sp, high);
                     self.sp = self.sp.wrapping_sub(1);
                     bus.write(self.sp, low);
-                    self.sp = self.sp.wrapping_sub(1);
-                    self.pc = addr;
+                    self.pc = address;
+                    6
+                } else {
+                    3
                 }
-            },
-            0x_CD => {
-                let addr = self.fetch_u16(bus);
+            }
+            0xCD => {
+                let address = self.fetch_u16(bus);
                 let [low, high] = self.pc.to_le_bytes();
                 self.sp = self.sp.wrapping_sub(1);
                 bus.write(self.sp, high);
                 self.sp = self.sp.wrapping_sub(1);
                 bus.write(self.sp, low);
-                self.pc = addr;
-            },
-            0xC7 | 0xCF | 0xD7 | 0xDF |
-            0xE7 | 0xEF | 0xF7 | 0xFF => {
-                // RST
-                let tgt3 = (instr & 0b0011_1000) as u16;
+                self.pc = address;
+                6
+            }
+            0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
+                let target = (instr & 0b0011_1000) as u16;
                 let [low, high] = self.pc.to_le_bytes();
                 self.sp = self.sp.wrapping_sub(1);
                 bus.write(self.sp, high);
                 self.sp = self.sp.wrapping_sub(1);
                 bus.write(self.sp, low);
-                self.pc = tgt3;
-            },
+                self.pc = target;
+                4
+            }
+            // POP r16
             0xC1 | 0xD1 | 0xE1 | 0xF1 => {
-            // POP
                 let register = (instr >> 4) & 0b11;
                 let low = bus.read(self.sp);
                 self.sp = self.sp.wrapping_add(1);
                 let high = bus.read(self.sp);
                 self.sp = self.sp.wrapping_add(1);
                 self.write_r16stk(register, u16::from_le_bytes([low, high]));
-            },
+                3
+            }
+            // PUSH r16
             0xC5 | 0xD5 | 0xE5 | 0xF5 => {
-            // PUSH
                 let register = (instr >> 4) & 0b11;
                 let [low, high] = self.read_r16stk(register).to_le_bytes();
                 self.sp = self.sp.wrapping_sub(1);
                 bus.write(self.sp, high);
                 self.sp = self.sp.wrapping_sub(1);
                 bus.write(self.sp, low);
-            },
-            0xCB => { // CB prefix
+                4
+            }
+            0xCB => {
                 let cb_instruction = self.fetch_u8(bus);
-                self.handle_cb(cb_instruction, bus);
-            },
+                self.handle_cb(cb_instruction, bus)
+            }
             0xE2 => {
                 bus.write(0xFF00 + self.c as u16, self.a);
-            },
+                2
+            }
             0xE0 => {
                 let addr_offset = self.fetch_u8(bus);
                 bus.write(0xFF00 + addr_offset as u16, self.a);
-            },
+                3
+            }
             0xEA => {
                 let address = self.fetch_u16(bus);
                 bus.write(address, self.a);
-            },
+                4
+            }
             0xF2 => {
-                let val = bus.read(0xFF00 + self.c as u16);
-                self.a = val;
-            },
+                self.a = bus.read(0xFF00 + self.c as u16);
+                2
+            }
             0xF0 => {
                 self.a = self.fetch_u8(bus);
-            },
+                3
+            }
             0xFA => {
-                self.a = bus.read(self.fetch_u16(bus));
-            },
+                let address = self.fetch_u16(bus);
+                self.a = bus.read(address);
+                4
+            }
             0xE8 => {
-                let offset = self.fetch_u8(bus) as i8;
-                self.sp = self.sp.wrapping_add_signed(offset as i16);
-            },
-
+                let offset = self.fetch_u8(bus);
+                self.sp = self.add_sp_offset(offset);
+                4
+            }
             0xF8 => {
-                let offset = self.fetch_u8(bus) as i8;
-                let value = self.sp.wrapping_add_signed(offset as i16);
+                let offset = self.fetch_u8(bus);
+                let value = self.add_sp_offset(offset);
                 [self.h, self.l] = value.to_be_bytes();
-            },
+                3
+            }
             0xF9 => {
                 self.sp = self.hl();
-            },
-            // 0 -> 34
-            // 1 -> 12
-            // bc = 1234
-            _ => panic!("...")
-            
+                2
+            }
+            0xF3 => {
+                self.ime = false;
+                1
+            }
+            0xFB => {
+                self.ime = true;
+                1
+            }
+            _ => panic!("unimplemented opcode {instr:#04X}"),
         }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::Memory;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Access {
+        Read(u16),
+        Write(u16, u8)
+    }
+
+    struct TestMemory {
+        bytes:[u8; 0x10000],
+        accesses: Vec<Access>
+    }
+
+    impl Memory for TestMemory {
+        fn read(& mut self, address: u16) -> u8 {
+
+            self.accesses.push(Access::Read(address));
+            self.bytes[address as usize]
+        }
+
+        fn write(&mut self, address: u16, value: u8) {
+            self.bytes[address as usize] = value;
+            self.accesses.push(Access::Write(address, value));
+        }
+    }
+
+    fn system_with_program(program: &[u8]) -> (CPU, TestMemory) {
+        let cpu = CPU::new();
+        let mut memory = TestMemory {
+            bytes: [0; 0x10000],
+            accesses: Vec::new(),
+        };
+        let start = cpu.pc as usize;
+        memory.bytes[start..start + program.len()].copy_from_slice(program);
+
+        (cpu, memory)
+    }
+    //
+            // 0x01 | 0x11 | 0x21 | 0x31 => {
+            //     let val = self.fetch_u16(bus);
+            //     self.write_r16((instr >> 4) & 0b11, val);
+            //     3
+            // }
+    #[test]
+    fn ld_r16_imm16() {
+        let cases = [
+            (0x01, [0x34, 0x12, 0x00, 0x00, 0x00, 0x00], 0x0000),
+            (0x11, [0x00, 0x00, 0x34, 0x12, 0x00, 0x00], 0x0000),
+            (0x21, [0x00, 0x00, 0x00, 0x00, 0x34, 0x12], 0x0000),
+            (0x31, [0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 0x3412),
+        ];
+
+        for (opcode, expected_registers, expected_sp) in cases {
+            let (mut cpu, mut memory) =
+                system_with_program(&[opcode, 0x12, 0x34]);
+
+            let cycles = cpu.step(&mut memory);
+
+            assert_eq!(
+                [cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l],
+                expected_registers,
+                "incorrect register state after opcode {opcode:#04X}",
+            );
+            assert_eq!(
+                cpu.sp, expected_sp,
+                "incorrect SP after opcode {opcode:#04X}",
+            );
+            assert_eq!(cycles, 3, "incorrect cycles for opcode {opcode:#04X}");
+            assert_eq!(cpu.pc, 0x0103, "incorrect PC for opcode {opcode:#04X}");
+        }
+    }
+
+
+
+            // LD [r16mem], A
+            // 0x02 | 0x12 | 0x22 | 0x32 => {
+            //     let addr = self.read_r16mem((instr >> 4) & 0b11);
+            //     bus.write(addr, self.a);
+            //     2
+            // }
+    #[test]
+    fn ld_a_r16mem() {
+        let cases = [
+            (0x0A, [0x34, 0x12, 0x00, 0x00, 0x00, 0x00]),
+            (0x1A, [0x00, 0x00, 0x34, 0x12, 0x00, 0x00]),
+            (0x2A, [0x00, 0x00, 0x00, 0x00, 0x34, 0x12]),
+            (0x3A, [0x00, 0x00, 0x00, 0x00, 0x34, 0x12]),
+        ];
+
+        for (opcode, expected_registers) in cases {
+            let (mut cpu, mut memory) =
+                system_with_program(&[opcode]);
+            memory.bytes[0x3412] = 69; // aye
+
+            [cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l] = expected_registers;
+
+            let cycles = cpu.step(&mut memory);
+
+            assert_eq!(cpu.a, 69);
+            assert_eq!(cycles, 2, "incorrect cycles for opcode {opcode:#04X}"); 
+        }
+    }
+
+
+    #[test]
+    fn step_returns_fixed_instruction_cycles() {
+        let (mut cpu, mut memory) = system_with_program(&[
+            0x00,             // NOP: 1
+            0x06, 0x42,       // LD B, imm8: 2
+            0x01, 0x34, 0x12, // LD BC, imm16: 3
+        ]);
+
+        assert_eq!(cpu.step(&mut memory), 1);
+        assert_eq!(cpu.step(&mut memory), 2);
+        assert_eq!(cpu.step(&mut memory), 3);
+    }
+
+    #[test]
+    fn jr_condition_cycles_depend_on_whether_branch_is_taken() {
+        let cases = [
+            (0x20, FLAG_Z, false), // JR NZ
+            (0x28, FLAG_Z, true),  // JR Z
+            (0x30, FLAG_C, false), // JR NC
+            (0x38, FLAG_C, true),  // JR C
+        ];
+
+        for (opcode, flag, taken_when_set) in cases {
+            let (mut taken_cpu, mut taken_memory) =
+                system_with_program(&[opcode, 0x02]);
+            taken_cpu.set_flag(flag, taken_when_set);
+
+            assert_eq!(
+                taken_cpu.step(&mut taken_memory),
+                3,
+                "incorrect taken cycles for opcode {opcode:#04X}",
+            );
+            assert_eq!(
+                taken_cpu.pc, 0x0104,
+                "incorrect taken PC for opcode {opcode:#04X}",
+            );
+
+            let (mut untaken_cpu, mut untaken_memory) =
+                system_with_program(&[opcode, 0x02]);
+            untaken_cpu.set_flag(flag, !taken_when_set);
+
+            assert_eq!(
+                untaken_cpu.step(&mut untaken_memory),
+                2,
+                "incorrect untaken cycles for opcode {opcode:#04X}",
+            );
+            assert_eq!(
+                untaken_cpu.pc, 0x0102,
+                "incorrect untaken PC for opcode {opcode:#04X}",
+            );
+        }
+    }
+
+    #[test]
+    fn register_and_hl_operands_have_different_cycles() {
+        let (mut register_cpu, mut register_memory) = system_with_program(&[0x80]);
+        assert_eq!(register_cpu.step(&mut register_memory), 1); // ADD A, B
+
+        let (mut memory_cpu, mut memory) = system_with_program(&[0x86]);
+        memory_cpu.h = 0xC0;
+        memory_cpu.l = 0x00;
+        assert_eq!(memory_cpu.step(&mut memory), 2); // ADD A, [HL]
+    }
+
+    #[test]
+    fn cb_cycles_distinguish_register_bit_and_hl_operations() {
+        let (mut register_cpu, mut register_memory) = system_with_program(&[0xCB, 0x00]);
+        assert_eq!(register_cpu.step(&mut register_memory), 2); // RLC B
+
+        let (mut bit_cpu, mut bit_memory) = system_with_program(&[0xCB, 0x46]);
+        bit_cpu.h = 0xC0;
+        bit_cpu.l = 0x00;
+        assert_eq!(bit_cpu.step(&mut bit_memory), 3); // BIT 0, [HL]
+
+        let (mut rotate_cpu, mut rotate_memory) = system_with_program(&[0xCB, 0x06]);
+        rotate_cpu.h = 0xC0;
+        rotate_cpu.l = 0x00;
+        assert_eq!(rotate_cpu.step(&mut rotate_memory), 4); // RLC [HL]
+    }
+
 
     #[test]
     fn daa_adjusts_low_digit_after_addition() {
