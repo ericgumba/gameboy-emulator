@@ -12,7 +12,6 @@ Once the instruction set is implemented, focus on making it verifiably correct b
 
 ### 1. Finish writable memory and the bus
 
-This is your immediate next step because `Bus::write()` is currently unimplemented. Give the bus storage for:
 
 - VRAM
 - Work RAM
