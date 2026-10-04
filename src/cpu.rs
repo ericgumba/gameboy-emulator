@@ -166,7 +166,7 @@ impl CPU {
     }
 
     fn update_bitwise_flags(&mut self, h_flag_val: bool) {
-        self.set_flag(FLAG_Z, false);
+        self.set_flag(FLAG_Z, self.a == 0);
         self.set_flag(FLAG_N, false);
         self.set_flag(FLAG_H, h_flag_val);
         self.set_flag(FLAG_C, false);
@@ -861,7 +861,8 @@ impl CPU {
                 2
             }
             0xF0 => {
-                self.a = self.fetch_u8(bus);
+                let offset = self.fetch_u8(bus) as u16;
+                self.a = bus.read(0xFF00 + offset);
                 3
             }
             0xFA => {
@@ -1051,6 +1052,19 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn inc_r16() {
+        let (mut cpu, mut memory) = system_with_program(&[
+            0x00,             // NOP: 1
+            0x06, 0x42,       // LD B, imm8: 2
+            0x01, 0x34, 0x12, // LD BC, imm16: 3
+        ]);
+
+        assert_eq!(cpu.step(&mut memory), 1);
+        assert_eq!(cpu.step(&mut memory), 2);
+        assert_eq!(cpu.step(&mut memory), 3);
+    }
 
     #[test]
     fn step_returns_fixed_instruction_cycles() {
