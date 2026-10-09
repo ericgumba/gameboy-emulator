@@ -1,0 +1,1 @@
+don't spoil solutions, if a bug is found. Just provide playful hints.

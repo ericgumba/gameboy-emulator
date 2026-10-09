@@ -106,20 +106,20 @@ impl CPU {
 
     fn add_to_a(&mut self, val: u8) {
         let a = self.a;
-        let (val, carry) = a.overflowing_add(val);
-        let half_carry = (a & 0xF) + (val & 0xF) > 0xF;
+        let (value, carry) = a.overflowing_add(val);
+        let half_carry = (a & 0xF) + (val & 0xF) > 0xF; 
 
-        self.a = val;
+        self.a = value;
 
         self.set_flag(FLAG_C, carry);
         self.set_flag(FLAG_H, half_carry);
-        self.set_flag(FLAG_Z, val == 0);
+        self.set_flag(FLAG_Z, value == 0);
         self.set_flag(FLAG_N, false);
     }
 
-    fn sub_from_a(&mut self, val: u8) {
+    fn sub_from_a(&mut self, value: u8) {
         let a = self.a;
-        let (val, carry) = a.overflowing_sub(val);
+        let (val, carry) = a.overflowing_sub(value);
 
         let half_carry = (a & 0xF) < (val & 0xF);
 
@@ -136,11 +136,11 @@ impl CPU {
 
     fn add_to_hl(&mut self, val: u16) {
 
-        let hl = self.hl();
-        let (val, carry) = hl.overflowing_add(val);
+        let hl: u16 = self.hl();
+        let (new_val, carry) = hl.overflowing_add(val);
         let half_carry = (hl & 0xFFF) + (val & 0xFFF) > 0xFFF;
 
-        [self.h, self.l] = val.to_be_bytes();
+        [self.h, self.l] = new_val.to_be_bytes();
 
         self.set_flag(FLAG_C, carry);
         self.set_flag(FLAG_H, half_carry);
@@ -559,6 +559,7 @@ impl CPU {
                 self.write_r8(register, result, bus);
                 if register == 6 { 3 } else { 1 }
             }
+
             // LD r8, imm8
             0x06 | 0x16 | 0x26 | 0x36 | 0x0E | 0x1E | 0x2E | 0x3E => {
                 let value = self.fetch_u8(bus);
@@ -700,9 +701,23 @@ impl CPU {
                 2
             }
             0xCE => {
-                let carry = self.get_flag(FLAG_C);
-                let value = self.fetch_u8(bus).wrapping_add(carry);
-                self.add_to_a(value);
+                let carry_in = self.get_flag(FLAG_C);
+                let value = self.fetch_u8(bus);
+                let old_a = self.a;
+
+                let sum = u16::from(old_a)
+                    + u16::from(value)
+                    + u16::from(carry_in);
+
+                self.a = sum as u8;
+
+                self.set_flag(FLAG_Z, self.a == 0);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(
+                    FLAG_H,
+                    (old_a & 0x0F) + (value & 0x0F) + carry_in > 0x0F,
+                );
+                self.set_flag(FLAG_C, sum > 0xFF);
                 2
             }
             0xD6 => {
@@ -899,8 +914,10 @@ impl CPU {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::bus::Memory;
+    use std::u16;
+
+use super::*;
+    use crate::{bus::Memory, cpu};
 
     #[derive(Debug, PartialEq, Eq)]
     enum Access {
@@ -1052,18 +1069,224 @@ mod tests {
         }
     }
 
+            // instrs:
+            //      .byte $36,0,0 ; LD   (HL),$00
+            //      .byte $06,0,0 ; LD   B,$00
+            //      .byte $0E,0,0 ; LD   C,$00
+            //      .byte $16,0,0 ; LD   D,$00
+            //      .byte $1E,0,0 ; LD   E,$00
+            //      .byte $26,0,0 ; LD   H,$00
+            //      .byte $2E,0,0 ; LD   L,$00
+            //      .byte $3E,0,0 ; LD   A,$00
+            //      .byte $F6,0,0 ; OR   $00
+            //      .byte $FE,0,0 ; CP   $00
+            //      .byte $C6,0,0 ; ADD  $00
+            //      .byte $CE,0,0 ; ADC  $00
+            //      .byte $D6,0,0 ; SUB  $00
+            //      .byte $DE,0,0 ; SBC  $00
+            //      .byte $E6,0,0 ; AND  $00
+            //      .byte $EE,0,0 ; XOR  $00
+    #[test]
+    fn or_a_imm8() {
+        let cases = [0x11, 0x00, 0x10, 0x01];
+        for op in cases {
+            let (mut cpu, mut memory) = system_with_program(&[0xf6, op]);
+            cpu.step(& mut memory);
+            match op {
+                0x11 => {assert_eq!(cpu.a, 0x11); assert_eq!(cpu.get_flag(FLAG_Z), 0) },
+                0x00 => {assert_eq!(cpu.a, 0x00); assert_eq!(cpu.get_flag(FLAG_Z), 1) },
+                0x10 => {assert_eq!(cpu.a, 0x10); assert_eq!(cpu.get_flag(FLAG_Z), 0)},
+                0x01 => {assert_eq!(cpu.a, 0x01); assert_eq!(cpu.get_flag(FLAG_Z), 0)},
+                _ => panic!("exhaustive")
+            }
+        }
+    }
 
     #[test]
-    fn inc_r16() {
-        let (mut cpu, mut memory) = system_with_program(&[
-            0x00,             // NOP: 1
-            0x06, 0x42,       // LD B, imm8: 2
-            0x01, 0x34, 0x12, // LD BC, imm16: 3
-        ]);
+    fn cp_a_imm8() {
+        let cases = [
+            ("equal", 0x42, 0x42, FLAG_Z | FLAG_N),
+            ("half borrow", 0x3C, 0x2F, FLAG_N | FLAG_H),
+            ("full borrow", 0x10, 0x20, FLAG_N | FLAG_C),
+            ("half and full borrow", 0x00, 0x01, FLAG_N | FLAG_H | FLAG_C),
+        ];
 
-        assert_eq!(cpu.step(&mut memory), 1);
-        assert_eq!(cpu.step(&mut memory), 2);
-        assert_eq!(cpu.step(&mut memory), 3);
+        for (name, initial_a, immediate, expected_flags) in cases {
+            let (mut cpu, mut memory) = system_with_program(&[0xFE, immediate]);
+            cpu.a = initial_a;
+            cpu.f = FLAG_Z | FLAG_N | FLAG_H | FLAG_C;
+
+            let cycles = cpu.step(&mut memory);
+
+            assert_eq!(cpu.a, initial_a, "CP changed A in case: {name}");
+            assert_eq!(cpu.f, expected_flags, "incorrect flags in case: {name}");
+            assert_eq!(cpu.pc, 0x0102, "incorrect PC in case: {name}");
+            assert_eq!(cycles, 2, "incorrect cycles in case: {name}");
+            assert_eq!(
+                memory.accesses,
+                vec![Access::Read(0x0100), Access::Read(0x0101)],
+                "incorrect memory accesses in case: {name}",
+            );
+        }
+    }
+            //      .byte $CE,0,0 ; ADC  $00
+
+    #[test]
+    fn add_a_imm8() {
+        let cases = [
+            ("no flags", 0x12, 0x34, 0x46, 0),
+            ("half carry", 0x0F, 0x01, 0x10, FLAG_H),
+            ("carry", 0xF0, 0x20, 0x10, FLAG_C),
+            ("zero with half carry and carry", 0xFF, 0x01, 0x00, FLAG_Z | FLAG_H | FLAG_C),
+        ];
+
+        for (name, initial_a, immediate, expected_a, expected_flags) in cases {
+            let (mut cpu, mut memory) = system_with_program(&[0xC6, immediate]);
+            cpu.a = initial_a;
+            cpu.f = FLAG_Z | FLAG_N | FLAG_H | FLAG_C;
+
+            let cycles = cpu.step(&mut memory);
+
+            assert_eq!(cpu.a, expected_a, "incorrect A in case: {name}");
+            assert_eq!(cpu.f, expected_flags, "incorrect flags in case: {name}");
+            assert_eq!(cpu.pc, 0x0102, "incorrect PC in case: {name}");
+            assert_eq!(cycles, 2, "incorrect cycles in case: {name}");
+            assert_eq!(
+                memory.accesses,
+                vec![Access::Read(0x0100), Access::Read(0x0101)],
+                "incorrect memory accesses in case: {name}",
+            );
+        }
+    }
+    #[test]
+    fn adc_a_imm8() {
+        let cases = [
+            ("without carry in", 0x12, 0x34, false, 0x46, 0),
+            ("with carry in", 0x12, 0x34, true, 0x47, 0),
+            ("half carry from carry in", 0x0F, 0x00, true, 0x10, FLAG_H),
+            ("full carry without half carry", 0xF0, 0x10, false, 0x00, FLAG_Z | FLAG_C),
+            ("half and full carry", 0xFF, 0x00, true, 0x00, FLAG_Z | FLAG_H | FLAG_C),
+            ("operand plus carry wraps", 0x00, 0xFF, true, 0x00, FLAG_Z | FLAG_H | FLAG_C),
+        ];
+
+        for (name, initial_a, immediate, carry_in, expected_a, expected_flags) in cases {
+            let (mut cpu, mut memory) = system_with_program(&[0xCE, immediate]);
+            cpu.a = initial_a;
+            cpu.f = FLAG_Z | FLAG_N | FLAG_H;
+            cpu.set_flag(FLAG_C, carry_in);
+
+            let cycles = cpu.step(&mut memory);
+
+            assert_eq!(cpu.a, expected_a, "incorrect A in case: {name}");
+            assert_eq!(cpu.f, expected_flags, "incorrect flags in case: {name}");
+            assert_eq!(cpu.pc, 0x0102, "incorrect PC in case: {name}");
+            assert_eq!(cycles, 2, "incorrect cycles in case: {name}");
+            assert_eq!(
+                memory.accesses,
+                vec![Access::Read(0x0100), Access::Read(0x0101)],
+                "incorrect memory accesses in case: {name}",
+            );
+        }
+    }
+
+    #[test]
+    fn ld_r_imm8() {
+        let cases = [
+            (0x06, [1,0,0,0,0,0,0]),
+            (0x16, [0,0,1,0,0,0,0]) ,
+            (0x26, [0,0,0,0,1,0,0]) ,
+            (0x36, [0,0,0,0,0x10,0x01,0]) ,
+            (0x0E, [0,1,0,0,0,0,0]) ,
+            (0x1E, [0,0,0,1,0,0,0]) ,
+            (0x2E, [0,0,0,0,0,1,0]) ,
+            (0x3E, [0,0,0,0,0,0,1])
+            ]; 
+        for (op, expected) in cases {
+
+            let (mut cpu, mut memory) = system_with_program(&[op, 0x1]);
+
+            if op == 0x36 {
+                cpu.h = 0x10;
+                cpu.l = 0x01;
+            }
+            let cycles = cpu.step(& mut memory);
+            
+
+            assert_eq!([cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l, cpu.a], expected);
+            if op == 0x36 {
+                assert_eq!(cycles, 3);
+                assert_eq!(memory.bytes[cpu.hl() as usize], 1);
+            } else {
+                assert_eq!(cycles, 2);
+            }
+
+        }
+    }
+
+// instrs:
+//      .byte $33,0,0     ; INC  SP
+//      .byte $3B,0,0     ; DEC  SP
+//      .byte $39,0,0     ; ADD  HL,SP
+//      .byte $F9,0,0     ; LD   SP,HL
+//      .byte $E8,$01,0   ; ADD  SP,1
+//      .byte $E8,$FF,0   ; ADD  SP,-1
+//      .byte $F8,$01,0   ; LD   HL,SP+1
+//      .byte $F8,$FF,0   ; LD   HL,SP-1
+
+    #[test]
+
+    fn add_hl_r16() {
+        let mut cpu = CPU::new();
+
+        cpu.set_flag(FLAG_N, true);
+
+        cpu.h = 0xFF;
+        cpu.l = 0xFF;
+        cpu.add_to_hl(1);
+        assert_eq!(cpu.h, 0);
+        assert_eq!(cpu.l, 0);
+        assert_eq!(cpu.get_flag(FLAG_N), 0);
+        assert_eq!(cpu.get_flag(FLAG_H), 1);
+        assert_eq!(cpu.get_flag(FLAG_C), 1);
+
+    }
+
+    #[test]
+    fn inc_r16_sp() {
+
+        // make 0x33 repeat for 2^16 times
+        let mut memory = TestMemory {
+            bytes: [0x33; 0x10000],
+            accesses: Vec::new()
+        };
+
+        let mut cpu = CPU::new();
+
+        for i in 0..=u16::MAX {
+            let cycles = cpu.step(&mut memory);
+            assert_eq!(cpu.sp, i.wrapping_add(1));
+            assert_eq!(cycles, 2);
+
+        } 
+    }
+
+    #[test]
+    fn dec_r16_sp() {
+
+        // make 0x33 repeat for 2^16 times
+        let mut memory = TestMemory {
+            bytes: [0x3B; 0x10000],
+            accesses: Vec::new()
+        };
+
+        let mut cpu = CPU::new();
+
+        for i in (0..=u16::MAX).rev() {
+            let cycles = cpu.step(&mut memory);
+            assert_eq!(cpu.sp, i);
+            assert_eq!(cycles, 2);
+
+        } 
     }
 
     #[test]
