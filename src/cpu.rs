@@ -647,9 +647,22 @@ impl CPU {
             0x88..=0x8F => {
                 let source = instr & 0b111;
                 let carry = self.get_flag(FLAG_C);
-                let value = self.read_r8(source, bus).wrapping_add(carry);
-                self.add_to_a(value);
+                let value = self.read_r8(source, bus);
+                let old_a = self.a; 
+
+                let sum = u16::from(old_a) + u16::from(value) + u16::from(carry);
+                self.a = sum as u8;
+
+                self.set_flag(FLAG_Z, self.a == 0);
+                self.set_flag(FLAG_N, false);
+                self.set_flag(
+                    FLAG_H,
+                    (old_a & 0x0F) + (value & 0x0F) + carry > 0x0F,
+                );
+                self.set_flag(FLAG_C, sum > 0xFF);
+
                 if source == 6 { 2 } else { 1 }
+
             }
             // SUB A, r8
             0x90..=0x97 => {
@@ -662,8 +675,20 @@ impl CPU {
             0x98..=0x9F => {
                 let source = instr & 0b111;
                 let carry = self.get_flag(FLAG_C);
-                let value = self.read_r8(source, bus).wrapping_add(carry);
-                self.sub_from_a(value);
+                let value = self.read_r8(source, bus);
+                let old_a = self.a;
+                let result = old_a.wrapping_sub(value).wrapping_sub(carry);
+
+                let new_flag_c = u16::from(old_a) < u16::from(value) + u16::from(carry);
+
+                let new_flag_h = old_a & 0xF < (value & 0xF) + carry;
+
+                self.a = result;
+                self.set_flag(FLAG_Z, self.a == 0);
+                self.set_flag(FLAG_N, true);
+                self.set_flag(FLAG_H, new_flag_h);
+                self.set_flag(FLAG_C, new_flag_c);
+
                 if source == 6 { 2 } else { 1 }
             }
             // AND A, r8
@@ -727,8 +752,16 @@ impl CPU {
             }
             0xDE => {
                 let carry = self.get_flag(FLAG_C);
-                let value = self.fetch_u8(bus).wrapping_add(carry);
-                self.sub_from_a(value);
+                let value = self.fetch_u8(bus);
+                let old_a = self.a;
+                let result =  old_a.wrapping_sub(value).wrapping_sub(carry);
+                let carry_flag = u16::from(old_a) < (u16::from(value) + u16::from(carry)); 
+                let half_flag = old_a & 0xF < (value & 0xF) + carry;
+                self.a = result;
+                self.set_flag(FLAG_Z, self.a == 0);
+                self.set_flag(FLAG_N, true);
+                self.set_flag(FLAG_H, half_flag);
+                self.set_flag(FLAG_C, carry_flag);
                 2
             }
             0xE6 => {
