@@ -1,0 +1,79 @@
+Interrupt polling
+- Calculate pending = IF & IE & 0x1F
+- Wake HALT when pending != 0
+- If IME is false, leave request pending
+- Select highest-priority pending interrupt
+- Clear selected IF bit
+- Clear IME
+- Push PC with correct stack order
+- Jump to vector
+- Return 5 machine cycles
+
+
+Interrupt polling
+- Calculate pending = IF & IE & 0x1F
+- Wake HALT when pending != 0
+- If IME is false, leave request pending
+- Select highest-priority pending interrupt
+- Clear selected IF bit
+- Clear IME
+- Push PC with correct stack order
+- Jump to vector
+- Return 5 machine cycles
+
+so the test for this would look like 
+mock test memory to have a variable called pending = 0x1F
+1. test that when ime is set to false this var remains unchanged and the pc advances by 1.
+2. test that when ime is set to true this var changes. the stack is decremented and pc is set
+  to the correct location and it returned 5 cycles
+
+additionally we need to implement a mapping 
+const INTERRUPTS: [(u8, 16); 5] = [
+    (1, 0x40),
+    (2, 0x48),
+    (4, 0x50),
+    (8, 0x58),
+    (16, 0x60),
+];
+
+then when we get pending we get which vector we jump to 
+
+fn interrupt_location(pending:u8) -> u8 {
+  b = 1 
+  for _ in 0..5 {
+      if pending & b {
+        b 
+      }
+      b = b << 1
+  }
+}
+
+then we write tests where we set the mocked memory's pending vectors to 
+1, 1 << 1, 1 << 2, ..., 1 << 4 and test that each value returns the correct location
+
+
+
+
+0b0001_1111
+
+
+
+
+IME instructions
+- DI is immediate
+- EI is delayed by one instruction
+- DI cancels delayed EI
+
+RETI
+- Pop PC
+- Enable IME immediately
+- Return 4 machine cycles
+
+Timers
+- Tick bus after every CPU step
+- Implement internal divider and DIV behavior
+- Implement TAC enable/frequency selection
+- Increment TIMA
+- Reload TIMA from TMA on overflow
+- Request Timer interrupt through IF
+- Continue ticking while CPU is halted

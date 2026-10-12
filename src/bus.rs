@@ -3,7 +3,10 @@ use crate::cartridge::Cartridge;
 pub trait Memory {
     fn read(&mut self, address: u16) -> u8;
     fn write(&mut self, address: u16, value: u8);
-}
+    fn pending_interrupts(&self) -> u8;
+    fn ack_interrupt(&mut self, mask: u8);
+} 
+
 pub struct Bus {
     cartridge: Cartridge,
     vram: [u8; 0x2000],
@@ -66,6 +69,13 @@ impl Memory for Bus {
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
             0xFFFF => self.interrupt_enable = value,
         }
+    }
+
+    fn pending_interrupts(&self) -> u8 {
+        self.io[0x0F] & self.interrupt_enable & 0x1F
+    }
+    fn ack_interrupt(&mut self, mask: u8) {
+        self.io[0x0F] &= !mask;
     }
 }
 

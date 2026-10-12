@@ -5,6 +5,13 @@ const FLAG_H: u8 = 1 << 5;
 const FLAG_Z: u8 = 1 << 7;
 const FLAG_N: u8 = 1 << 6;
 
+const INTERRUPTS: [(u8, u16); 5] = [
+    (1, 0x40),
+    (2, 0x48),
+    (4, 0x50),
+    (8, 0x58),
+    (16, 0x60),
+];
 pub struct CPU {
     a: u8,
     f: u8,
@@ -17,7 +24,8 @@ pub struct CPU {
     sp: u16,
     pc: u16,
     halted: bool,
-    ime: bool
+    ime: bool,
+    ime_enable_pending:bool
 }
 
 impl CPU {
@@ -47,7 +55,8 @@ impl CPU {
             sp: 0,
             pc: 0x100, // Or 0x0100 for a post-bootrom Game Boy state
             halted: false,
-            ime: false
+            ime: false,
+            ime_enable_pending: false
             
         }
     }
@@ -66,6 +75,15 @@ impl CPU {
         let high = self.fetch_u8(bus);
         u16::from_le_bytes([low, high])
 
+    }
+
+    fn push_u16<M: Memory>(&mut self, bus: &mut M, value: u16) {
+        let [high, low] = value.to_be_bytes();
+
+        self.sp = self.sp.wrapping_sub(1);
+        bus.write(self.sp, high);
+        self.sp = self.sp.wrapping_sub(1);
+        bus.write(self.sp, low);
     }
 
     fn inc_u8(&mut self, value: u8) -> u8 {
@@ -484,8 +502,31 @@ impl CPU {
         }
     }
 
+    fn interrupt_location(&self, pending: u8) -> Option<(u8, u16)> {
+        INTERRUPTS.iter().copied().find(|(mask, _)| pending & mask != 0)
+    }
+
 
     pub fn step<M: Memory>(&mut self, bus: &mut M) -> u8 {
+
+        let pending = bus.pending_interrupts();
+        
+        if self.ime {
+            if let Some((mask, vector)) = self.interrupt_location(pending) {
+                self.push_u16(bus, self.pc);
+                self.ime = false;
+                // clear mask
+                bus.ack_interrupt(mask);
+                self.pc = vector;
+                return 5
+            }
+        }
+
+        if self.ime_enable_pending {
+            self.ime = true;
+            self.ime_enable_pending = false;
+        }
+
         if self.halted {
             return 1;
         }
@@ -834,11 +875,7 @@ impl CPU {
                 let condition = self.cond_flag((instr >> 3) & 0b11);
                 let address = self.fetch_u16(bus);
                 if condition {
-                    let [low, high] = self.pc.to_le_bytes();
-                    self.sp = self.sp.wrapping_sub(1);
-                    bus.write(self.sp, high);
-                    self.sp = self.sp.wrapping_sub(1);
-                    bus.write(self.sp, low);
+                    self.push_u16(bus, self.pc);
                     self.pc = address;
                     6
                 } else {
@@ -847,21 +884,13 @@ impl CPU {
             }
             0xCD => {
                 let address = self.fetch_u16(bus);
-                let [low, high] = self.pc.to_le_bytes();
-                self.sp = self.sp.wrapping_sub(1);
-                bus.write(self.sp, high);
-                self.sp = self.sp.wrapping_sub(1);
-                bus.write(self.sp, low);
+                self.push_u16(bus, self.pc);
                 self.pc = address;
                 6
             }
             0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
                 let target = (instr & 0b0011_1000) as u16;
-                let [low, high] = self.pc.to_le_bytes();
-                self.sp = self.sp.wrapping_sub(1);
-                bus.write(self.sp, high);
-                self.sp = self.sp.wrapping_sub(1);
-                bus.write(self.sp, low);
+                self.push_u16(bus, self.pc);
                 self.pc = target;
                 4
             }
@@ -878,11 +907,8 @@ impl CPU {
             // PUSH r16
             0xC5 | 0xD5 | 0xE5 | 0xF5 => {
                 let register = (instr >> 4) & 0b11;
-                let [low, high] = self.read_r16stk(register).to_le_bytes();
-                self.sp = self.sp.wrapping_sub(1);
-                bus.write(self.sp, high);
-                self.sp = self.sp.wrapping_sub(1);
-                bus.write(self.sp, low);
+                let value = self.read_r16stk(register);
+                self.push_u16(bus, value);
                 4
             }
             0xCB => {
@@ -937,7 +963,7 @@ impl CPU {
                 1
             }
             0xFB => {
-                self.ime = true;
+                self.ime_enable_pending = true;
                 1
             }
             _ => panic!("unimplemented opcode {instr:#04X}"),
@@ -949,7 +975,7 @@ mod tests {
     use std::u16;
 
 use super::*;
-    use crate::{bus::Memory, cpu};
+    use crate::{bus::Memory};
 
     #[derive(Debug, PartialEq, Eq)]
     enum Access {
@@ -973,6 +999,14 @@ use super::*;
             self.bytes[address as usize] = value;
             self.accesses.push(Access::Write(address, value));
         }
+
+        fn pending_interrupts(&self) -> u8 {
+            0x1F
+        }
+
+        fn ack_interrupt(&mut self, mask: u8) {
+            
+        }
     }
 
     fn system_with_program(program: &[u8]) -> (CPU, TestMemory) {
@@ -985,6 +1019,39 @@ use super::*;
         memory.bytes[start..start + program.len()].copy_from_slice(program);
 
         (cpu, memory)
+    }
+
+    #[test]
+    fn push_u16_writes_high_then_low_to_descending_stack() {
+        let (mut cpu, mut memory) = system_with_program(&[]);
+        cpu.sp = 0xD000;
+
+        cpu.push_u16(&mut memory, 0x1234);
+
+        assert_eq!(cpu.sp, 0xCFFE);
+        assert_eq!(memory.bytes[0xCFFE], 0x34);
+        assert_eq!(memory.bytes[0xCFFF], 0x12);
+        assert_eq!(
+            memory.accesses,
+            vec![
+                Access::Write(0xCFFF, 0x12),
+                Access::Write(0xCFFE, 0x34),
+            ],
+        );
+    }
+
+    #[test]
+    fn f() {}
+
+    #[test]
+    fn ei_triggers_ime_after_1_cycle() {
+        let (mut cpu, mut memory) = system_with_program(&[0xFB, 0x00]);
+        cpu.step(&mut memory);
+        assert!(!cpu.ime);
+        cpu.step(&mut memory);
+        assert!(cpu.ime);
+
+
     }
 
     #[test]
